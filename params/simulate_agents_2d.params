@@ -1,0 +1,142 @@
+# ======================================================================
+# Multi-agent 2D corridor traffic simulation (08_simulate_agents_2d.py)
+# ======================================================================
+# A fleet of UAV agents flies missions between the DB (depot) and DK
+# (delivery) objectives on the two-lane corridor network from step 07,
+# plus continuous city-monitoring PATROLS that loop around the map.
+#
+# Occupancy rule -- ONE AGENT PER LEG-BLOCK:
+#   * each directed leg-lane is a block that holds at most ONE agent at a
+#     time ("same leg cannot be captured by two agents"); the reverse
+#     lane of a corridor is a separate block (direction can differ);
+#   * an origin may launch MANY agents at once, as long as they take
+#     different first legs (different paths);
+#   * there is NO global concurrency cap, so the observed peak concurrent
+#     count is the network's true simultaneous-agent capacity;
+#   * demand arrives uniformly over SHIFT_HOURS; excess queues as backlog.
+# ----------------------------------------------------------------------
+
+# Input / output ------------------------------------------------------
+CORRIDOR_DIR = "output/07_corridor_network"
+OUTPUT_DIR   = "output/09_agent_sim_2d"
+# Slowness cost-map from 08_generate_costmap.py (true velocity = slowness x
+# base speed). If the file is absent, base speeds are used.
+COST_MAP_FILE = "output/08_costmap/slowness_costmap.npz"
+
+# Fleet ---------------------------------------------------------------
+N_AGENTS        = 1000       # total delivery missions (demand)
+SHIFT_HOURS     = 1.0        # nominal target window (deadline search starts here)
+ARRIVAL_WINDOW_H = 0.0       # demand injected over this span; 0 -> all ready at t=0
+BALANCE_ROUTES  = True       # cycle missions round-robin over ALL routes (use them
+                             #   all at once) instead of random endpoints
+MAX_CONCURRENT  = 300        # meter airborne agents to this many. With the half-leg
+                             #   merge rule + reroute-on-stuck this drains fully; the
+                             #   merge rule (not the cap) sets the throughput.
+ROUND_TRIP_PROB = 0.5        # P(non-contingency mission is a round trip)
+SIM_SEED        = 12345      # RNG seed for reproducible fleets
+
+# Deadline search: smallest window in which ALL deliveries finish -------
+DEADLINE_START_H = 1.0       # target (force all to finish within this)
+DEADLINE_STEP_H  = 0.5       # if not, extend the window by this each step
+
+# Drone energy + battery: P(v) = HOVER_POWER_W + DRAG_POWER_COEF * v^3 ---
+HOVER_POWER_W   = 220.0      # hover / induced power floor (W); also drain while holding
+DRAG_POWER_COEF = 0.050      # parasitic term (W per (m/s)^3); sets optimal speed
+BATTERY_WH      = 200.0      # usable battery energy per drone (Wh)
+START_BATTERY_PCT = 1.0      # battery charge at first launch
+# Dock charging: at each dock the drone recharges; it may only depart again
+# once it reaches CHARGE_TARGET_PCT. Charge time = (target - level)/CHARGE_POWER.
+CHARGE_POWER_W    = 600.0    # charge rate (W)  -> ~20 min for a full 200 Wh pack
+CHARGE_TARGET_PCT = 0.9      # must reach 90% battery before leaving a dock
+
+# UAV speed classes ---------------------------------------------------
+SPEED_CLASSES_KMH   = [60.0, 50.0, 30.0]   # 3 UAV classes
+SPEED_CLASS_WEIGHTS = [1.0, 1.0, 1.0]      # selection weights (normalised)
+
+# City-monitoring patrols ---------------------------------------------
+# One patrol sortie takes off every PATROL_INTERVAL_MIN minutes and flies
+# PATROL_LAPS loop(s) of the map perimeter, then lands.
+PATROL_INTERVAL_MIN = 30.0   # a patroller is on air every 30 minutes
+PATROL_LAPS         = 1      # perimeter loops per sortie
+PATROL_SPEED_KMH    = 50.0   # patrol cruise speed
+
+# Contingencies -------------------------------------------------------
+# A fraction of trips hit a "false condition" mid-outbound and must
+# either REROUTE via a backup corridor to the destination, or RETURN TO
+# BASE (fly back to the origin). Split controlled by BACKUP_FRACTION.
+CONTINGENCY_PROB = 0.15      # 15% of trips hit a "false condition"
+BACKUP_FRACTION  = 0.667     # of the 15%: ~10% reroute to dest (no return),
+                             #   ~5% return to base (0.667*15=10, 0.333*15=5)
+
+# Endpoints -----------------------------------------------------------
+DB_PREFIX = "DB"
+DK_PREFIX = "DK"
+
+# Flight dynamics -----------------------------------------------------
+SERVICE_TIME_S = 60.0         # dwell at the far end before a round-trip return
+
+# Deconfliction -------------------------------------------------------
+# FLOW_MODE controls lane occupancy:
+#   "spacing" -- many agents per lane, each kept >= SEPARATION_M behind the
+#                one ahead (car-following). Deadlock-free: the fleet always
+#                drains, so completion-time / energy studies are meaningful.
+#   "block"   -- strict ONE agent per leg-lane. Matches "same leg cannot be
+#                captured by two agents", but gridlocks under heavy load
+#                (circular waits at junctions), so most missions never finish.
+FLOW_MODE      = "spacing"
+# Separation is a TIME headway: an agent stays >= TIME_HEADWAY_S seconds behind
+# the one ahead, so the distance gap scales with speed (30 s = 500 m at 60 km/h,
+# 250 m at 30 km/h). SEPARATION_M is only a lower-bound floor.
+TIME_HEADWAY_S = 30.0
+SEPARATION_M   = 80.0         # distance floor (m) under the time headway
+# A CONFLICT (marked with a red star) is a near-miss between agents on
+# DIFFERENT corridors: they come within CONFLICT_TIME_S seconds of impact
+# (distance below CONFLICT_TIME_S * the faster agent's speed). 5 s ~= 80 m
+# at cruise, matching the "80 m ~ 5.6 s to impact" reference.
+CONFLICT_TIME_S = 5.0
+# MERGE rule: a new agent may merge onto a lane only if the nearest agent
+# already on it is at least this fraction of the leg length ahead (that much
+# of the leg free), never closer than SEPARATION_M. The lane is "locked" to
+# new entries until its occupant clears that much of it; if no lane is free
+# the agent waits. Spreads traffic across more lanes/routes.
+MERGE_FREE_FRAC = 0.5
+
+# Dynamic ACO-style routing ------------------------------------------
+# Routes are planned at launch by least-cost search over the network,
+# with a congestion "pheromone": capturing a leg adds CAPTURE_COST_M to
+# its routing cost; that penalty decays to 0 as the occupant passes the
+# half-way point of the leg. So the next agent routes AROUND captured
+# legs (onto longer paths). ZONE_BIAS_M steers the fastest class to the
+# OUTER corridors and the slowest to the shorter INNER ones.
+CAPTURE_COST_M = 3000.0       # cost a freshly-captured leg adds (metres-equiv)
+ZONE_BIAS_M    = 2000.0       # inner/outer steering strength by speed class
+# Optional junction (node) mutex on top of leg-block. OFF here so that one
+# location can launch multiple agents at once; turn ON to also forbid two
+# agents inside a junction zone simultaneously (raises closest-approach at
+# hubs but serialises departures).
+NODE_MUTEX_ENABLE = False
+NODE_APPROACH_M      = 50.0   # node-mutex zone at traffic nodes (if enabled)
+OBJECTIVE_APPROACH_M = 120.0  # node-mutex zone at DB/DK hubs (if enabled)
+
+# Time stepping -------------------------------------------------------
+DT_S              = 1.0       # simulation step
+HORIZON_FACTOR    = 80.0      # cap sim time at SHIFT * factor; large so the run fully
+                              #   drains all missions (ends early when all complete)
+GRIDLOCK_TIMEOUT_S = 300.0    # if nothing moves this long -> declare gridlock & stop
+STUCK_TIMEOUT_S    = 180.0    # if an agent is blocked this long at a node, it diverts
+                              #   via an alternate corridor (breaks spillback deadlocks)
+
+# Outputs -------------------------------------------------------------
+SAMPLE_EVERY_S   = 60.0       # record a timeline/animation frame this often
+MAX_GIF_FRAMES   = 360        # subsample frames down to at most this many
+GIF_FPS          = 20
+MAKE_HTML        = True        # self-contained interactive 2D agents_animation.html
+MAKE_ANIMATION   = True        # matplotlib agents_animation.gif
+WRITE_TRAJECTORY = True        # downsampled trajectories.csv
+
+# PyVista 3D view -----------------------------------------------------
+MAKE_PYVISTA      = True       # 3D scene: movie + interactive HTML + PNG
+PYVISTA_MAX_FRAMES = 300       # subsample frames for the 3D movie
+PYVISTA_Z_OUTBOUND = 60.0      # altitude (m) of outbound (to-DK) agents
+PYVISTA_Z_INBOUND  = 100.0     # altitude (m) of inbound (to-DB) agents
+PYVISTA_Z_PATROL   = 140.0     # altitude (m) of patrol agents

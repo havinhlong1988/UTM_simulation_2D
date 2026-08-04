@@ -1,0 +1,89 @@
+# ======================================================================
+# DBSCAN hit-count clustering parameters
+# ======================================================================
+
+# Input/output
+THETA_OUTPUT_DIR = "output/02_thetastar_master_plan"
+ROUTE_NODES_DIR = "output/02_thetastar_master_plan/route_nodes"
+MODEL_FILE = "output/02_thetastar_master_plan/planning_model_with_flz_support.xyz"
+OUTPUT_DIR = "output/03_clustering_hitcount"
+
+# ----------------------------------------------------------------------
+# Hit-count definition
+# ----------------------------------------------------------------------
+# hit_count = number of unique routes passing through a node.
+# visit_count = raw number of rows/visits, also saved for diagnostics.
+
+# ----------------------------------------------------------------------
+# DBSCAN on high-hit nodes
+# ----------------------------------------------------------------------
+DBSCAN_EPS_M = 150.0
+DBSCAN_MIN_SAMPLES = 10
+DBSCAN_USE_HIT_COUNT_WEIGHT = True
+MIN_HIT_COUNT_FOR_DBSCAN = 10
+
+# ----------------------------------------------------------------------
+# Candidate intermediate nodes
+# ----------------------------------------------------------------------
+CANDIDATE_TOP_K_PER_CLUSTER = 1
+CANDIDATE_MIN_HIT_COUNT = 2
+CANDIDATE_MIN_GRAPH_DEGREE = 2
+CANDIDATE_EXCLUDE_LABEL_PREFIXES = ["DB", "DK", "RA"]
+CANDIDATE_INCLUDE_HIGH_HIT_NOISE = True
+HIGH_HIT_NOISE_PERCENTILE = 90.0
+MAX_HIGH_HIT_NOISE_CANDIDATES = 20
+
+# ----------------------------------------------------------------------
+# FLZ as traffic node
+# ----------------------------------------------------------------------
+# See params/dbscan.params for the full explanation. False keeps FLZ nodes
+# out of the major/minor candidate pools even though they still show high
+# hit_count from 02's FLZ buffer requirement.
+FLZ_PREFIXES = ["FLZ"]
+CONSIDER_FLZ_AS_TRAFFIC_NODE = True
+PLOT_MARK_FLZ_NODES = True
+
+# See params/dbscan.params for the full explanation. Excludes candidates
+# within this radius of a DB/DK/FLZ objective (they're already inside
+# that objective's own buffer zone, not a distinct traffic hub).
+CANDIDATE_OBJECTIVE_MERGE_PREFIXES = ["DB", "DK", "FLZ"]
+CANDIDATE_MIN_DISTANCE_TO_OBJECTIVE_M = 100.0
+
+# ----------------------------------------------------------------------
+# Whole-area density + balanced area-based candidate optimization
+# ----------------------------------------------------------------------
+# Use a regular area grid so candidates are not all concentrated in the center.
+AREA_GRID_SIZE_M = 1000.0
+AREA_BASE_CANDIDATES_PER_ACTIVE_AREA = 1
+AREA_EXTRA_CANDIDATES_MAX = 2
+AREA_MAX_CANDIDATES_PER_AREA = 3
+
+# Keep candidates spatially separated.
+CANDIDATE_MIN_SEPARATION_M = 300.0
+CANDIDATE_RELAXED_MIN_SEPARATION_M = 180.0
+ALLOW_RELAXED_AREA_SELECTION = True
+
+# Candidate pool scoring
+CANDIDATE_SCORE_HIT_WEIGHT = 0.60
+CANDIDATE_SCORE_DEGREE_WEIGHT = 0.20
+CANDIDATE_SCORE_PAIR_WEIGHT = 0.15
+CANDIDATE_SCORE_CLUSTER_WEIGHT = 0.05
+
+# ----------------------------------------------------------------------
+# Plotting
+# ----------------------------------------------------------------------
+NOFLY_SLOWNESS_THRESHOLD = 10.0
+PLOT_FONT_FAMILY = "DejaVu Serif"
+PLOT_TITLE_SIZE = 16
+PLOT_LABEL_SIZE = 12
+PLOT_LEGEND_SIZE = 9
+PLOT_DPI = 250
+BASE_NODE_SIZE = 2.0
+PLOT_SHOW_BASE_MODEL = False
+HEATMAP_CMAP = "magma_r"
+HEATMAP_ALPHA = 1.0
+NORMAL_NODE_SIZE = 28.0
+CANDIDATE_STAR_SIZE = 220.0
+SYMBOL_EDGE_LINEWIDTH = 0.65
+CANDIDATE_EDGE_LINEWIDTH = 1.25
+PLOT_CANDIDATE_LABELS = True

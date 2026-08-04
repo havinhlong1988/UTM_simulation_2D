@@ -1,0 +1,446 @@
+# ======================================================================
+# Theta* master CORRIDOR planning parameters (06_run_master_corridor_theta.py)
+# ======================================================================
+# Forked from params/thetastar.params (02's params, v16). Reads stage 03's
+# clustering output (MODEL_FILE below) instead of the raw riskmap, and adds
+# two new sections at the bottom: TN buffer (hard requirement, type-
+# dependent radius) and turn-angle reduction (best-effort smoothing pass).
+# Everything above this note is carried over UNCHANGED from 02's params --
+# "follow the rule of 02" applies at the params level too.
+#
+# v16 changes: THETASTAR_POINT_CLEARANCE_M replaced by THETASTAR_ROUTE_WIDTH_M
+# -- src/thetastar.py (bumped to v16 too, one shared version number) now
+# formally models every route as a circular prism (cylinder) around its
+# centerline; the old parameter named a radius
+# with obstacle-clearance framing, the new one names the corridor's width
+# (diameter) directly, e.g. 50 m for a route. No behavior change beyond the
+# renamed/re-derived parameter (radius = width / 2, same geometry as before
+# at the equivalent radius). Figures now also draw each route's corridor --
+# the cylinder's 2D map footprint -- as a translucent filled band alongside
+# the centerline (PLOT_SHOW_ROUTE_CORRIDOR / PLOT_ROUTE_CORRIDOR_ALPHA).
+# v15 changes: PAIR_DIRECTION_ORDER (default interleaved: fwd couple 1
+# -> bwd couple 1 -> ...) balances corridor claims between directions;
+# figures no longer draw rejected routes as accepted
+# (PLOT_INCLUDE_FAILED for diagnostic display).
+# v14 changes: added BACKUP_SEPARATION_* -- successful backups are
+# rejected unless genuinely separated from their main (length-dependent
+# allowance: 10% long / 5% short routes).
+# v13 changes: all planner mask/geometry math now runs in meters even on
+# lon/lat maps (xm/ym metric columns via model_io's converter). No new
+# params; meter thresholds below now mean meters on every map.
+# v12 changes: bug fix -- backups can no longer coincide with their own
+# main inside FLZ buffers (block-main guarantee now holds everywhere
+# except endpoint driveways). No new params.
+# v11 changes: added LIVE_PAIR_PROGRESS -- live slot-percentage lines
+# inside each pair plus retry heartbeat lines, visible in real time in
+# both sequential and parallel modes.
+# v10 changes: added FLZ_BUFFER_ENABLE / FLZ_BUFFER_RADIUS_M -- when on,
+# every route must pass within the buffer of at least one FLZ (mains
+# replan start->FLZ->end if they miss; backups widen corridors, and a
+# main whose couple can't satisfy it is locked and replaced). Progress
+# output restyled to stage bars: 'Theta* pair routes:  45%|xxxx|'.
+# v9 changes: retry-until-exhausted semantics (MAX_MAIN_BACKUP_RETRY is
+# now an optional cap, 0 = unlimited: a rank only gives up when no new
+# distinct main exists). Added N_CORES for parallel execution across
+# pairs (0 = auto: cpu_count - 1).
+# v8 changes: added MAX_MAIN_BACKUP_RETRY -- a main whose backup search
+# fails is now rejected and locked instead of accepted with a degenerate
+# backup; a new main is tried. Rank skipped (not duplicated) if the
+# retry budget runs out. See the MAX_MAIN_BACKUP_RETRY comment below for
+# real cost numbers from testing before you raise it from 2.
+# v7 changes: added TEST_SINGLE_PAIR (run one pair instead of the full
+# batch). Backup routes now report distance_diff_m / backup_mean_offset_m
+# / backup_max_offset_m against main -- no new params needed for this,
+# it reuses the existing BACKUP_CORRIDOR_M_LIST / BACKUP_BLOCK_MAIN_RADIUS_M
+# mechanism below, which was already there and already doing this job.
+# v6 changes: added TABLE_MAX_K / TABLE_PENALTY_WEIGHT /
+# TABLE_MAX_PENALTY_FACTOR / TABLE_DUPLICATE_OVERLAP_PERCENT for
+# run_theta_k_paths() (02_run_theta_plan.py v6), the new penalty/plateau
+# k-shortest-paths table.
+# v5 changes: THETASTAR_LINE_OF_SIGHT_METHOD -> "point_clearance" (was
+# "bresenham"; ~4.85x faster + far fewer redundant waypoints on this
+# nodal model, see src/thetastar.py's LOS benchmark notes). Added
+# THETASTAR_SHOW_PROGRESS / THETASTAR_PROGRESS_INTERVAL_S for the new live
+# progress bar.
+# ======================================================================
+
+MODEL_FILE = "output/03_clustering_hitcount/master_plan_input_nodes.csv"
+OUTPUT_DIR = "output/06_master_corridor_theta"
+
+# ----------------------------------------------------------------------
+# Route objectives
+# ----------------------------------------------------------------------
+# Normal master network endpoints should be DB and DK only.
+# FLZ is emergency support, not a normal endpoint.
+ROUTE_OBJECTIVE_PREFIXES = ["DB", "DK"]
+EXCLUDE_ROUTE_OBJECTIVE_PREFIXES = ["RA", "FLZ"]
+FLZ_AS_ROUTE_ENDPOINT = False
+
+PAIR_MODE = "unordered"
+SKIP_SAME_PREFIX = False
+MAX_PAIR_DISTANCE_M = 0.0
+
+# ----------------------------------------------------------------------
+# Number of routes per pair
+# ----------------------------------------------------------------------
+# 1 means one master corridor per direction, each with its own nearby
+# backup (backup stays close to its main via BACKUP_CORRIDOR_M_LIST /
+# BACKUP_SEPARATION_*, not a second independent corridor):
+#   forward_main_01, forward_backup_01
+#   backward_main_01, backward_backup_01
+ROUTE_SETS_PER_DIRECTION = 1
+
+# main_01 is fastest. main_02+ avoid previous main routes.
+# Larger radius gives more separated / usually longer alternative main routes.
+MAIN_ROUTE_AVOID_PREVIOUS_RADIUS_M_LIST = [250.0, 200.0, 150.0, 100.0, 50.0, 0.0]
+
+# For secondary main routes, choose the longest successful candidate among the relaxed trials.
+# Options: "longest" | "first_success"
+ALTERNATIVE_MAIN_SELECTION_MODE = "longest"
+ALLOW_MAIN_DUPLICATE_IF_FAILED = False
+
+# ----------------------------------------------------------------------
+# FLZ emergency safety attraction
+# ----------------------------------------------------------------------
+USE_FLZ_SAFETY_ATTRACTION = True
+FLZ_SUPPORT_SIGMA_M = 800.0
+FLZ_SAFETY_WEIGHT = 0.40
+MIN_FLZ_SLOWNESS_FACTOR = 0.65
+SAVE_FLZ_SUPPORT_COLUMNS = True
+
+# ----------------------------------------------------------------------
+# No-fly / flyable rule
+# ----------------------------------------------------------------------
+NOFLY_SLOWNESS_THRESHOLD = 10.0
+NOFLY_SLOWNESS_VALUE = 10.0
+FORCE_ROUTE_OBJECTIVES_FLYABLE = False
+
+# ----------------------------------------------------------------------
+# Theta* parameters passed directly to src/thetastar.py
+# ----------------------------------------------------------------------
+THETASTAR_ASTAR_FIRST_LOS_SMOOTH = True
+THETASTAR_ALLOW_ANY_ANGLE = True
+THETASTAR_PURE_ASTAR_DELEGATE = True
+# Switched from "bresenham": on this nodal/KDTree model, bresenham both
+# over-rejected valid shortcuts (longer, zig-zaggier paths: 46-107 waypoints
+# instead of 2-6 on the same routes in benchmarking) and ran ~4.85x slower
+# overall, because point_clearance's vectorized NumPy check beats
+# bresenham's pure-Python cell-by-cell walk at this node count, even though
+# bresenham has the better complexity class on paper.
+THETASTAR_LINE_OF_SIGHT_METHOD = "point_clearance"
+THETASTAR_BRESENHAM_CLEARANCE_CELLS = 1
+THETASTAR_OUTPUT_SAMPLED_PATH = True
+THETASTAR_LOS_STRAIGHT_PATH_FALLBACK = False
+# Route corridor (v16): every route is modeled as a circular prism
+# (cylinder) around its centerline. THETASTAR_ROUTE_WIDTH_M is that
+# corridor's width on the 2D map, which is the cylinder's diameter in 3D --
+# a shortcut is only accepted if the whole corridor (radius = width / 2),
+# not just the centerline, stays clear of no-fly node centers.
+THETASTAR_ROUTE_WIDTH_M = 50.0
+THETASTAR_LINE_OF_SIGHT_STEP_FACTOR = 0.5
+THETASTAR_LOS_SMOOTH_MAX_LOOKAHEAD_NODES = 200
+THETASTAR_EDGE_FALLBACK_TO_ASTAR = True
+THETASTAR_HEURISTIC_WEIGHT = 1.08
+THETASTAR_MAX_EXPANSIONS = 150000
+
+# ----------------------------------------------------------------------
+# Progress monitoring
+# ----------------------------------------------------------------------
+# Live, in-place percentage bar during each search (expanded nodes vs.
+# THETASTAR_MAX_EXPANSIONS), plus a start/done line either way. If your
+# THETASTAR_ASTAR_FIRST_LOS_SMOOTH path successfully delegates to
+# src/astar.py, the live bar can't show (that search happens outside this
+# file) -- you still get a start line and a done line with real smoothing
+# stats once control returns here.
+THETASTAR_SHOW_PROGRESS = False
+THETASTAR_PROGRESS_INTERVAL_S = 0.15
+
+# ----------------------------------------------------------------------
+# Speed constraints
+# ----------------------------------------------------------------------
+SEARCH_BBOX_BUFFER_M = 1500.0
+RETRY_FULL_MAP_IF_FAILED = True
+
+# ----------------------------------------------------------------------
+# Forward / backward / backup route constraints
+# ----------------------------------------------------------------------
+# Backup route must stay close to its own main route.
+BACKUP_CORRIDOR_M_LIST = [50.0, 100.0, 150.0, 200.0, 250.0]
+BACKUP_BLOCK_MAIN_RADIUS_M = 30.0
+ENDPOINT_BUFFER_M = 150.0
+
+# Backward routes try to avoid all forward main routes.
+BACKWARD_AVOID_FORWARD_RADIUS_M_LIST = [200.0, 150.0, 100.0, 50.0, 0.0]
+ALLOW_BACKUP_DUPLICATE_IF_FAILED = True
+
+# ----------------------------------------------------------------------
+# Dual parallel route with soft buffer (Approach B)
+# ----------------------------------------------------------------------
+# When PARALLEL_SOFT_BUFFER_ENABLE is on, the parallel route (path2, the
+# former "backup") is planned by an outer penalty loop instead of the
+# corridor+block-mask search above: path1 = the accepted main stays
+# fixed, path2 is re-searched with a repulsive cost field around path1
+# (quadratic: lambda*((D-d)/D)^2 for d < D, extra multiplier near
+# crossings). The buffer is SOFT -- >= BUFFER_TARGET_M is preferred,
+# narrow spots at geometric bottlenecks are tolerated, crossings
+# (d -> 0 / side change) are penalized much harder than narrowness.
+# lambda escalates by GROWTH_RATE when re-searching stops improving,
+# up to LAMBDA_CAP; the best-scoring path2 is returned with a violation
+# report (parallel_* columns in route_summary.csv) for manual review.
+# thetastar.py is untouched; the field rides on flyable-node slowness.
+PARALLEL_SOFT_BUFFER_ENABLE = True
+BUFFER_TARGET_M = 50.0            # buffer wanted between the two routes
+BUFFER_SAMPLE_STEP_M = 10.0       # resample step along path1 for clearance measuring
+BUFFER_PENALTY_LAMBDA_INIT = 1.0  # initial penalty weight
+BUFFER_PENALTY_GROWTH_RATE = 1.5  # lambda multiplier per non-improving iteration
+BUFFER_PENALTY_LAMBDA_CAP = 50.0  # above this, accept remaining violations
+BUFFER_CROSSING_MULTIPLIER = 8.0  # extra penalty for segments at/near a crossing
+BUFFER_MAX_ITERATIONS = 20        # outer penalty loop cap
+BUFFER_FIELD_RADIUS_M = 75.0      # field influence radius around path1 (~1.5x target)
+# Hard outer corridor: the field only pushes path2 AWAY, so without a
+# container path2 drifts to the globally cheapest corridor far from its
+# main (and both directions' parallels collapse onto the same line).
+# Parallel = near-but-not-touching: soft floor BUFFER_TARGET_M, hard
+# ceiling BUFFER_CORRIDOR_MAX_OFFSET_M. Set 0 to disable the ceiling.
+BUFFER_CORRIDOR_MAX_OFFSET_M = 250.0
+
+# ----------------------------------------------------------------------
+# Plotting
+# ----------------------------------------------------------------------
+SAVE_PAIR_FIGURES = True
+SAVE_OVERVIEW_FIGURE = True
+PLOT_NODE_SIZE = 4.0
+PLOT_ROUTE_LINEWIDTH = 1.2
+# Draw each route's corridor -- the 2D map footprint of the circular prism
+# (cylinder) THETASTAR_ROUTE_WIDTH_M defines around the centerline -- as a
+# translucent filled band alongside the plotted route line. The boundary is
+# also traced in gray (PLOT_ROUTE_CORRIDOR_EDGE_ALPHA) so two corridors
+# running close together (main + backup, adjacent ranks) stay visually
+# separated instead of blending into one translucent blob.
+PLOT_SHOW_ROUTE_CORRIDOR = True
+PLOT_ROUTE_CORRIDOR_ALPHA = 0.15
+PLOT_ROUTE_CORRIDOR_EDGE_ALPHA = 0.5
+
+
+# ----------------------------------------------------------------------
+# Route node locking / overlap control
+# ----------------------------------------------------------------------
+ENABLE_ROUTE_NODE_LOCK = True
+# Maximum percentage of non-terminal path nodes that may overlap with
+# already accepted route nodes.
+MAX_ROUTE_NODE_OVERLAP_PERCENT = 10.0
+# 0.0 means only exactly same nodes are considered overlap/locked.
+LOCK_NODE_RADIUS_M = 0.0
+# Try hard blocking of locked nodes first, then relax and accept only if the
+# final overlap percentage is below the limit.
+STRICT_LOCK_BLOCK_FIRST = True
+
+# Fancy plot font
+PLOT_FONT_FAMILY = "DejaVu Serif"
+PLOT_TITLE_FONT_SIZE = 16
+PLOT_LABEL_FONT_SIZE = 13
+PLOT_LEGEND_FONT_SIZE = 10
+PLOT_TEXT_FONT_SIZE = 8
+
+
+# ----------------------------------------------------------------------
+# Pair-aware swarm traffic criterion
+# ----------------------------------------------------------------------
+# Avoid flying near DB/DK terminals that are not part of the current pair.
+# Example: for DB01->DK02, routes avoid DB02, DK01, DK03... to reduce
+# high-density swarm traffic around unrelated terminals.
+USE_OTHER_DB_DK_TRAFFIC_AVOIDANCE = True
+OTHER_TERMINAL_AVOID_PREFIXES = ["DB", "DK"]
+OTHER_TERMINAL_AVOID_SIGMA_M = 450.0
+OTHER_TERMINAL_AVOID_WEIGHT = 0.80
+MAX_OTHER_TERMINAL_SLOWNESS_FACTOR = 2.50
+# ----------------------------------------------------------------------
+# K-shortest-paths table (penalty/plateau method, added v6)
+# ----------------------------------------------------------------------
+# run_theta_k_paths(): find the shortest path, penalize the nodes it used,
+# search again, repeat -- returns a ranked table instead of one route.
+TABLE_MAX_K = 6
+# Multiplicative slowness penalty per prior accepted path a node appeared
+# in (same mechanism as OTHER_TERMINAL_AVOID_WEIGHT above, different target).
+TABLE_PENALTY_WEIGHT = 1.5
+TABLE_MAX_PENALTY_FACTOR = 4.0
+# Stop early (rather than pad the table) if a new candidate still overlaps
+# the shortest path by at least this percent of interior nodes.
+TABLE_DUPLICATE_OVERLAP_PERCENT = 95.0
+
+# ----------------------------------------------------------------------
+# Test mode (added v7)
+# ----------------------------------------------------------------------
+# Leave empty to run the full pair set as normal. Set to "A_LABEL,B_LABEL"
+# (e.g. "DB01,DK01") to run just that one pair -- useful for quick
+# iteration without waiting on the whole batch. Order doesn't matter;
+# matches either direction of the pair.
+TEST_SINGLE_PAIR = ""
+
+# ----------------------------------------------------------------------
+# Main+backup atomicity retry (added v8)
+# ----------------------------------------------------------------------
+# If a main route's backup search fails (no viable backup even after
+# widening BACKUP_CORRIDOR_M_LIST), that main is rejected -- not accepted
+# with a duplicated/failed backup -- and locked (added to the avoid-list)
+# so a retry searches for a genuinely different main. Up to this many
+# candidate mains are tried per rank before giving up on that rank
+# (rank is then skipped: fewer route-sets than requested for that
+# direction, never a duplicate route).
+#
+# 0 (default) = unlimited: keep trying new mains until no new distinct
+# main exists under the lock/overlap limits (guaranteed to terminate --
+# every rejected main locks its nodes, shrinking the candidate space).
+# Set a positive number only as a time-budget cap: each attempt is a
+# full new main search PLUS a fully exhausted backup search, which
+# testing showed can exceed a minute on a constrained rank.
+MAX_MAIN_BACKUP_RETRY = 0
+
+# ----------------------------------------------------------------------
+# Parallel execution (added v9)
+# ----------------------------------------------------------------------
+# Number of worker processes for planning pairs in parallel. Pairs are
+# independent in this stage (no cross-pair locking), so this scales
+# nearly linearly. 0 = auto: use all cores minus one. 1 = sequential.
+N_CORES = 0
+
+# ----------------------------------------------------------------------
+# FLZ buffer requirement (added v10)
+# ----------------------------------------------------------------------
+# When ON, every route (main and backup) must pass within
+# FLZ_BUFFER_RADIUS_M of at least one FLZ node -- a hard requirement, on
+# top of the soft FLZ_SAFETY_ATTRACTION above. Mains that miss are
+# re-planned start -> best FLZ -> end (least-detour FLZ first, still
+# subject to the normal lock-overlap limits); if no via-route works, the
+# main is locked and a different main+backup couple is searched. Backups
+# that miss are forced through the buffer via a ring node under the same
+# corridor/block masks. FLZ buffer zones are exempt from lock-overlap
+# accounting (unavoidable shared 'interchange', like endpoint driveways).
+# Radius bumped to 450.0 (from 02's 100.0 default) per this script's own
+# requirement: routes must pass the FLZ within 400-500m.
+FLZ_BUFFER_ENABLE = True
+FLZ_BUFFER_RADIUS_M = 450.0
+
+# ----------------------------------------------------------------------
+# Live per-pair progress (added v11)
+# ----------------------------------------------------------------------
+# When ON, each pair prints a live percentage line as each rank's
+# main+backup couple resolves (percentage over route slots = 2 per rank
+# per direction), plus a heartbeat line per retry attempt so unlimited
+# retries never look like a hang. Works in parallel mode (whole lines,
+# tagged with the pair name).
+LIVE_PAIR_PROGRESS = True
+
+# ----------------------------------------------------------------------
+# Backup separation requirement (added v14)
+# ----------------------------------------------------------------------
+# A successful backup is REJECTED unless genuinely separated from its
+# main: at most the allowed percentage of its length (excluding endpoint
+# driveways, resampled at 25 m, measured point-to-segment against the
+# main polyline) may run closer than BACKUP_MIN_SEPARATION_M. Long
+# routes get a looser allowance than short ones. Rejection behaves like
+# the other gates: wider corridors are tried, then the v9 retry/skip
+# machinery takes over.
+BACKUP_SEPARATION_ENABLE = True
+# Default = BACKUP_BLOCK_MAIN_RADIUS_M if unset.
+BACKUP_MIN_SEPARATION_M = 30.0
+# Routes at least this long are "long".
+BACKUP_SEPARATION_LONG_ROUTE_M = 3000.0
+BACKUP_SEPARATION_MAX_VIOLATION_PCT_LONG = 10.0
+BACKUP_SEPARATION_MAX_VIOLATION_PCT_SHORT = 5.0
+
+# ----------------------------------------------------------------------
+# Direction scheduling + figure honesty (added v15)
+# ----------------------------------------------------------------------
+# "interleaved" (default): fwd couple 1 -> bwd couple 1 -> fwd couple 2
+# -> bwd couple 2 ... with fully shared lock state, so both directions
+# claim corridors alternately and stay balanced. "sequential" restores
+# the old order (all forward ranks first), which structurally starves
+# backward on constrained maps.
+PAIR_DIRECTION_ORDER = "interleaved"
+# Rejected routes carry their best-failed path for diagnostics; figures
+# no longer draw them as if accepted. Set True to show them as thin gray
+# dotted lines labeled "failed (not accepted)".
+PLOT_INCLUDE_FAILED = False
+
+# ======================================================================
+# TN buffer requirement (NEW in 06)
+# ======================================================================
+# Mirrors the FLZ buffer mechanism above, but with a TYPE-DEPENDENT
+# radius: a route qualifies if it passes within TN_BUFFER_MAJOR_RADIUS_M
+# of a MAJOR TN candidate node OR within TN_BUFFER_MINOR_RADIUS_M of a
+# MINOR TN candidate node (from stage 03's clustering, major/minor flags
+# in MODEL_FILE). This is OR, not AND -- whichever type the route is
+# actually close to is what counts, each judged against its own radius.
+# Distance-based, same "pass nearby, not through" semantics as the FLZ
+# buffer: the corridor does not need to stop at the TN node.
+#
+# Mains that miss are re-planned start -> best TN -> end (least-detour
+# TN first, major+minor pool unified, still subject to the normal
+# lock-overlap limits, and re-checked against the FLZ buffer too since
+# the via-TN route is a brand-new path). Backups that miss are forced
+# through the buffer via a ring node under the same corridor/block masks,
+# exactly like the FLZ version. TN buffer zones are exempt from
+# lock-overlap accounting for the same reason FLZ buffer zones are.
+TN_BUFFER_ENABLE = True
+TN_BUFFER_MAJOR_RADIUS_M = 100.0
+TN_BUFFER_MINOR_RADIUS_M = 50.0
+
+# Draw TN major/minor markers plus a translucent ring at each node's own
+# buffer radius on the figures. Without this the hard TN buffer
+# requirement above is invisible in the output plots.
+PLOT_SHOW_TN_BUFFER = True
+
+# ======================================================================
+# Turn-angle reduction (NEW in 06)
+# ======================================================================
+# Best-effort post-process on every ACCEPTED main/backup route (applied
+# after both the FLZ and TN buffer requirements are already satisfied):
+# reduce sharp/unnecessary turns as much as possible. NOT a hard cap --
+# if nothing can be safely removed, the route is returned unchanged. A
+# route's stored path is Theta*'s dense, Bresenham-expanded grid path
+# (every cell along each shortcut segment), so this first simplifies down
+# to the route's real corner points before analyzing turn angles, then
+# greedily prunes remaining small-angle corners, then re-expands the
+# survivors back into one dense, grid-validated path. Every removal is
+# re-validated against no-fly obstacles AND the FLZ+TN buffer
+# requirements (if enabled) before being accepted -- never breaks safety
+# or buffer compliance to gain a straighter line.
+TURN_REDUCTION_ENABLE = True
+
+# Shapely simplify() tolerance (meters) used to collapse the dense grid
+# path down to real corners -- tuned to absorb single-grid-cell Bresenham
+# jitter without losing genuine route geometry. Roughly half the model's
+# grid spacing is a reasonable starting point.
+TURN_REDUCTION_SIMPLIFY_TOLERANCE_M = 25.0
+
+# Turns already below this angle are treated as already-negligible and
+# skipped during the greedy pass (not worth an iteration).
+TURN_REDUCTION_MIN_ANGLE_DEG = 5.0
+
+# Safety cap on the greedy pass's iteration count.
+TURN_REDUCTION_MAX_ITERATIONS = 200
+
+# ======================================================================
+# Cross-pair overlap requirement (NEW in 06)
+# ======================================================================
+# Within-pair locking above (ENABLE_ROUTE_NODE_LOCK / MAX_ROUTE_NODE_
+# OVERLAP_PERCENT) only keeps ONE pair's own routes from duplicating each
+# other -- different DB<->DK pairs are otherwise planned completely
+# independently, so two pairs' corridors could heavily overlap outside
+# the shared TN/FLZ backbone. When ON, each pair's main/backup is also
+# checked against every EARLIER pair's already-accepted routes (its own
+# threshold, its own FLZ+TN buffer exemption -- sharing the backbone
+# there is the intended design, not something to penalize). A couple that
+# overlaps too much is rejected and locked, same lock-as-memory
+# reject-and-retry pattern as the FLZ/TN buffer checks.
+#
+# This requires pairs to be planned ONE AT A TIME so each pair can see
+# every earlier pair's result -- N_CORES is forced to 1 (sequential)
+# whenever this is on, regardless of the N_CORES setting above.
+CROSS_PAIR_OVERLAP_ENABLE = True
+
+# Looser than the within-pair MAX_ROUTE_NODE_OVERLAP_PERCENT (10%) above,
+# since some cross-pair sharing near the TN backbone (just outside its
+# exempt buffer radius) is expected and acceptable.
+CROSS_PAIR_MAX_ROUTE_NODE_OVERLAP_PERCENT = 20.0

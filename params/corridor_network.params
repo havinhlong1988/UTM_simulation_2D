@@ -1,0 +1,152 @@
+# ======================================================================
+# Corridor network builder parameters (07_build_corridor_network.py)
+# ======================================================================
+# Build the shared UAV corridor network: infrastructure only, no
+# routing. All network nodes (DB/DK objectives + step 03 TN candidates)
+# are simply connected to their neighbors -- TN-TN connections included.
+# Straight lines first, Theta* any-angle turns only where an obstacle
+# blocks the straight line. Every connection carries 2 parallel
+# corridors of CORRIDOR_DIAMETER_M with centerlines kept at least
+# MIN_CENTERLINE_SEPARATION_M apart. Path planning over the finished
+# network happens later and is out of scope.
+
+# Input/output
+MODEL_FILE = "output/03_clustering_hitcount/master_plan_input_nodes.csv"
+OUTPUT_DIR = "output/07_corridor_network"
+
+# ----------------------------------------------------------------------
+# Network nodes
+# ----------------------------------------------------------------------
+NETWORK_OBJECTIVE_PREFIXES = ["DB", "DK"]
+NETWORK_INCLUDE_MINOR_TN = True
+
+# ----------------------------------------------------------------------
+# Legs (straight first, Theta* only against obstacles)
+# ----------------------------------------------------------------------
+# MAXIMIZED connectivity: EVERY node pair within LEG_MAX_LENGTH_M whose
+# straight line keeps LEG_CLEARANCE_M to all no-fly nodes becomes a
+# connection (e.g. DK05-DK03 or MAJ001-DK01 directly, without an
+# intermediate TN). Blocked pairs are kept only for the LEG_KNN_K
+# nearest neighbors -- those get one Theta* any-angle detour; detours
+# longer than LEG_MAX_DETOUR_RATIO x the straight distance are dropped.
+LEG_KNN_K = 5
+LEG_MAX_LENGTH_M = 2500.0
+LEG_CLEARANCE_M = 50.0
+LEG_MAX_DETOUR_RATIO = 2.0
+
+# Corridors may only meet AT network nodes: connections that cross
+# another connection in mid-air, or that fly straight over an
+# intermediate node's circle without stopping there, are skipped
+# (shorter connections win, so the dropped ones are the long redundant
+# diagonals).
+LEG_SKIP_CROSSING = True
+
+# Local optimization of Theta* detour legs: greedy line-of-sight
+# shortcutting replaces the raw grid staircase with straight segments
+# wherever the straight segment keeps LEG_SMOOTH_CLEARANCE_M to every
+# no-fly node, so the offset lanes come out straight too.
+LEG_SMOOTH_ENABLE = True
+LEG_SMOOTH_CLEARANCE_M = 50.0
+
+# ----------------------------------------------------------------------
+# Two parallel corridors per connection (dual-parallel soft buffer, 06)
+# ----------------------------------------------------------------------
+# Each corridor is CORRIDOR_DIAMETER_M wide (drawn as the transparent
+# band with gray boundary). The two centerlines are kept at least
+# MIN_CENTERLINE_SEPARATION_M apart, so with 50/50 the corridors are
+# tangent and never overlap.
+CORRIDOR_DIAMETER_M = 50.0
+MIN_CENTERLINE_SEPARATION_M = 50.0
+# Every network node is a CIRCLE of this diameter. The two lane
+# centerlines of a leg are the parallel EXTERNAL TANGENTS of the end
+# circles: symmetric +/- (diameter/2) offsets of the connection
+# centerline that touch the outside of each circle -- no perpendicular
+# connector stubs anywhere. Keep this equal to
+# MIN_CENTERLINE_SEPARATION_M so the tangency is exact.
+NODE_CIRCLE_DIAMETER_M = 50.0
+# When one symmetric tangent offset side is blocked by an obstacle
+# (e.g. DK02-DK05 threads a no-fly gap off-center), the whole lane pair
+# is shifted sideways off the centerline -- separation preserved -- by
+# the smallest shift (steps of LANE_SHIFT_STEP_M, up to
+# LANE_SHIFT_MAX_M) that clears the obstacles on both sides.
+LANE_SHIFT_MAX_M = 100.0
+LANE_SHIFT_STEP_M = 5.0
+# The end node circles MOVE WITH their shifted corridors: each shifted
+# leg demands a lateral displacement at both end nodes, the node moves
+# by the average demand (capped at NODE_SHIFT_MAX_M, skipped if the
+# moved circle would touch a no-fly node) and the network is rebuilt
+# from the moved nodes -- usually turning the shifted pairs back into
+# symmetric tangent pairs. network_nodes.csv keeps x_orig/y_orig and
+# node_shift_m.
+NODE_SHIFT_ENABLE = True
+NODE_SHIFT_MAX_M = 50.0
+NODE_SHIFT_MAX_PASSES = 2
+
+# ----------------------------------------------------------------------
+# Backup TN suggestion (purple)
+# ----------------------------------------------------------------------
+# After the first network build, flyable spots inside the network's
+# convex hull that are far from every node and corridor centerline
+# (low-density areas) get a SUGGESTED backup TN (net_id BAKxx, drawn
+# purple). They are connected like any other node on the rebuild and
+# open extra legs that back up the network when a primary corridor is
+# unavailable.
+BACKUP_TN_ENABLE = True
+BACKUP_TN_MAX = 6
+BACKUP_TN_MIN_NETWORK_DIST_M = 400.0
+BACKUP_TN_CLEARANCE_M = 100.0
+BACKUP_TN_SPACING_M = 800.0
+
+# ----------------------------------------------------------------------
+# Expansion TN suggestion (magenta): use the space OUTSIDE the network
+# ----------------------------------------------------------------------
+# Farthest-point sampling over the flyable cells outside the network
+# hull: suggested extension TNs (net_id EXTxx, drawn magenta) pull
+# corridors into the unused space. Each pick must keep
+# EXPANSION_TN_CLEARANCE_M to the no-fly fields and lie within
+# EXPANSION_TN_MAX_LINK_M of a (possibly just suggested) node so a leg
+# can reach it; sampling stops when every outside pocket is within
+# EXPANSION_TN_MIN_DIST_M of the network. Suggestions that end up with
+# no buildable connection are dropped again.
+EXPANSION_TN_ENABLE = True
+EXPANSION_TN_MAX = 8
+EXPANSION_TN_MIN_DIST_M = 700.0
+EXPANSION_TN_CLEARANCE_M = 100.0
+EXPANSION_TN_MAX_LINK_M = 2000.0
+# The dual-parallel soft-buffer search below is only the last-resort
+# fallback when no clearing shift exists either.
+PARALLEL_SOFT_BUFFER_ENABLE = True
+BUFFER_TARGET_M = 50.0
+BUFFER_SAMPLE_STEP_M = 10.0
+BUFFER_PENALTY_LAMBDA_INIT = 1.0
+BUFFER_PENALTY_GROWTH_RATE = 1.5
+BUFFER_PENALTY_LAMBDA_CAP = 50.0
+BUFFER_CROSSING_MULTIPLIER = 8.0
+BUFFER_MAX_ITERATIONS = 20
+BUFFER_FIELD_RADIUS_M = 75.0
+BUFFER_CORRIDOR_MAX_OFFSET_M = 250.0
+# Lane endpoints merge at the network node -- trim only a short driveway
+# (legs are much shorter than 06's full pair routes).
+ENDPOINT_BUFFER_M = 100.0
+
+# ----------------------------------------------------------------------
+# Theta* engine (used only for obstacle-blocked legs and lane 2)
+# ----------------------------------------------------------------------
+NOFLY_SLOWNESS_THRESHOLD = 10.0
+NOFLY_SLOWNESS_VALUE = 10.0
+SEARCH_BBOX_BUFFER_M = 1500.0
+RETRY_FULL_MAP_IF_FAILED = True
+# Network legs SHOULD pass near terminals/TNs -- disable the per-pair
+# avoidance/attraction cost shaping from 06.
+USE_OTHER_DB_DK_TRAFFIC_AVOIDANCE = False
+USE_FLZ_SAFETY_ATTRACTION = False
+
+# ----------------------------------------------------------------------
+# Plotting
+# ----------------------------------------------------------------------
+PLOT_DPI = 250
+# One map per objective pair showing the path from A to B through its
+# intermediate legs (red/blue centerlines, transparent corridor fill,
+# gray corridor boundary) under figures/route_with_legs/.
+SAVE_ROUTE_FIGURES = True
+LEG_FIGURE_DPI = 160

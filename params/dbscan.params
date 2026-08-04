@@ -1,0 +1,237 @@
+# ======================================================================
+# DBSCAN hit-count clustering parameters
+# ======================================================================
+
+# Input/output
+THETA_OUTPUT_DIR = "output/02_thetastar_master_plan"
+ROUTE_NODES_DIR = "output/02_thetastar_master_plan/route_nodes"
+MODEL_FILE = "output/02_thetastar_master_plan/planning_model_with_flz_support.xyz"
+OUTPUT_DIR = "output/03_clustering_hitcount"
+
+# ----------------------------------------------------------------------
+# Hit-count definition
+# ----------------------------------------------------------------------
+# hit_count = number of unique routes passing through a node.
+# visit_count = raw number of rows/visits, also saved for diagnostics.
+
+# ----------------------------------------------------------------------
+# DBSCAN on high-hit nodes
+# ----------------------------------------------------------------------
+DBSCAN_EPS_M = 300
+DBSCAN_MIN_SAMPLES = 10
+DBSCAN_USE_HIT_COUNT_WEIGHT = True
+MIN_HIT_COUNT_FOR_DBSCAN = 10
+
+# ----------------------------------------------------------------------
+# Candidate intermediate nodes
+# ----------------------------------------------------------------------
+CANDIDATE_TOP_K_PER_CLUSTER = 2
+CANDIDATE_MIN_HIT_COUNT = 10
+CANDIDATE_MIN_GRAPH_DEGREE = 2
+CANDIDATE_EXCLUDE_LABEL_PREFIXES = ["DB", "DK", "RA"]
+CANDIDATE_INCLUDE_HIGH_HIT_NOISE = True
+HIGH_HIT_NOISE_PERCENTILE = 90.0
+MAX_HIGH_HIT_NOISE_CANDIDATES = 20
+
+# ----------------------------------------------------------------------
+# FLZ as traffic node
+# ----------------------------------------------------------------------
+# 02's FLZ buffer requirement forces every route close to an FLZ, so FLZ
+# nodes can end up with the highest hit_count on the whole map even though
+# that traffic is structural, not organic. This still applies whether or
+# not that route was actually going through the FLZ to land.
+#
+# CONSIDER_FLZ_AS_TRAFFIC_NODE = True  -> FLZ nodes may be selected as
+#   major/minor candidate traffic nodes (TN) like any other node.
+# CONSIDER_FLZ_AS_TRAFFIC_NODE = False -> FLZ nodes are excluded from the
+#   major/minor candidate pools (same mechanism as
+#   CANDIDATE_EXCLUDE_LABEL_PREFIXES). They still show up in
+#   node_hit_count.csv / full_area_density_map.csv / DBSCAN clusters
+#   (flagged via the is_flz column) so the analysis stays visible; they
+#   are just never exported as TN candidates for the master backbone.
+FLZ_PREFIXES = ["FLZ"]
+CONSIDER_FLZ_AS_TRAFFIC_NODE = True
+PLOT_MARK_FLZ_NODES = True
+
+# Overlay DB/DK objective markers on the analysis figures
+# (figures/00_*.png through 03_*.png), independent of
+# PLOT_SHOW_BASE_MODEL.
+PLOT_MARK_DB_DK_NODES = True
+
+# ----------------------------------------------------------------------
+# Objective-proximity merge (candidates too close to DB/DK/FLZ)
+# ----------------------------------------------------------------------
+# A candidate sitting right next to a DB/DK/FLZ objective isn't a
+# genuinely separate traffic hub -- the high hit-count there is just the
+# fan-in/fan-out of routes entering and leaving the objective, so any
+# route reaching the objective already passes right by it. When
+# CANDIDATE_OBJECTIVE_MERGE_ENABLE is on, candidates within
+# CANDIDATE_MIN_DISTANCE_TO_OBJECTIVE_M of an objective are excluded
+# (merged into that objective) from the major/minor pools. Set the
+# toggle to False to let near-objective nodes compete as TN candidates
+# again.
+CANDIDATE_OBJECTIVE_MERGE_ENABLE = True
+CANDIDATE_OBJECTIVE_MERGE_PREFIXES = ["DB", "DK", "FLZ"]
+CANDIDATE_MIN_DISTANCE_TO_OBJECTIVE_M = 300.0
+
+# ----------------------------------------------------------------------
+# Straight-flow pruning (candidates not doing obstacle avoidance)
+# ----------------------------------------------------------------------
+# High hit-count between two objectives does not always mark a genuine
+# turning hub: when the straight segment between two objectives is fully
+# flyable, the dense traffic along it is just the through-flow of routes
+# that fly that segment directly. A candidate on such a segment is not
+# part of any obstacle-avoidance detour, so it is removed. Candidates at
+# genuine detour corners survive because the straight segment they
+# shortcut is blocked by a no-fly obstacle.
+#   CORRIDOR_M  -- candidate counts as "on" the segment if its lateral
+#                  distance to the objective-objective line is below this
+#   CLEARANCE_M -- the segment counts as "clear" (prunable) only if no
+#                  no-fly node lies within this distance of it
+CANDIDATE_STRAIGHT_FLOW_PRUNE_ENABLE = True
+CANDIDATE_STRAIGHT_FLOW_OBJECTIVE_PREFIXES = ["DB", "DK"]
+CANDIDATE_STRAIGHT_FLOW_CORRIDOR_M = 150.0
+CANDIDATE_STRAIGHT_FLOW_CLEARANCE_M = 100.0
+
+# Final safety net against too-close candidates: the area-balanced
+# selectors allow relaxed separations (down to the RELAXED_* values), so
+# two final candidates can end up much closer than CANDIDATE_MIN_
+# SEPARATION_M. This pass enforces one global minimum distance over the
+# final pools -- majors claim their spots first, minors must clear both
+# the kept majors and each other.
+CANDIDATE_FINAL_MIN_SEPARATION_ENABLE = True
+CANDIDATE_FINAL_MIN_SEPARATION_M = 250.0
+
+# ----------------------------------------------------------------------
+# Major-TN crosscut requirement
+# ----------------------------------------------------------------------
+# A major TN marks an area with high traffic density AND strong
+# crosscut: routes must actually cross or branch there. A node carrying
+# only a single one-directional bundle of routes (route-graph degree 2:
+# one line straight through, no crossing) is a busy road segment, not a
+# hub -- it is demoted to the minor pool instead of dropped.
+#   MIN_GRAPH_DEGREE -- >= 3 means routes branch or cross at the node
+#   MIN_PAIR_COUNT   -- node must serve at least this many distinct
+#                       origin-destination pairs
+MAJOR_REQUIRE_CROSSCUT_ENABLE = True
+MAJOR_CROSSCUT_MIN_GRAPH_DEGREE = 3
+MAJOR_CROSSCUT_MIN_PAIR_COUNT = 2
+
+# ----------------------------------------------------------------------
+# Obstacle clearance for TN candidates
+# ----------------------------------------------------------------------
+# Downstream (07) every TN is a circle of 25 m radius whose two parallel
+# corridors (diameter 50 m) run tangent to it: the corridor edge reaches
+# node radius + corridor diameter = 75 m from the TN center. Candidates
+# closer than that to a no-fly node are shifted to the nearest safe
+# flyable node (up to SHIFT_MAX away); if no safe node exists, the
+# candidate stays and is flagged obstacle_clearance_ok = False.
+CANDIDATE_MIN_OBSTACLE_CLEARANCE_M = 75.0
+CANDIDATE_OBSTACLE_SHIFT_ENABLE = True
+CANDIDATE_OBSTACLE_SHIFT_MAX_M = 150.0
+
+# ----------------------------------------------------------------------
+# Whole-area density + balanced area-based candidate optimization
+# ----------------------------------------------------------------------
+AREA_GRID_SIZE_M = 1000.0
+AREA_BASE_CANDIDATES_PER_ACTIVE_AREA = 1
+AREA_EXTRA_CANDIDATES_MAX = 2
+AREA_MAX_CANDIDATES_PER_AREA = 3
+
+# Keep candidates spatially separated.
+CANDIDATE_MIN_SEPARATION_M = 300.0
+CANDIDATE_RELAXED_MIN_SEPARATION_M = 180.0
+ALLOW_RELAXED_AREA_SELECTION = True
+
+# Candidate pool scoring
+CANDIDATE_SCORE_HIT_WEIGHT = 0.60
+CANDIDATE_SCORE_DEGREE_WEIGHT = 0.20
+CANDIDATE_SCORE_PAIR_WEIGHT = 0.15
+CANDIDATE_SCORE_CLUSTER_WEIGHT = 0.05
+
+# ----------------------------------------------------------------------
+# Density plot filtering
+# ----------------------------------------------------------------------
+# Figure 00 removes no-fly and zero-density nodes from display.
+# The full CSV still keeps all nodes; the filtered CSV is also saved.
+DENSITY_PLOT_REMOVE_NOFLY = True
+DENSITY_PLOT_REMOVE_ZERO = True
+
+# ----------------------------------------------------------------------
+# Balanced colorbar
+# ----------------------------------------------------------------------
+# Percentile scaling prevents a few extreme values from making all nodes
+# look the same color. Values above the percentile cap are drawn in purple.
+COLORBAR_BALANCE_MODE = "percentile"     # percentile | max | fixed
+COLORBAR_PERCENTILE_MAX = 95.0
+COLORBAR_VMIN_MODE = "min_positive"      # min_positive | zero | percentile
+COLORBAR_PERCENTILE_MIN = 1.0
+COLORBAR_OVER_COLOR = "purple"
+COLORBAR_UNDER_COLOR = "black"
+COLORBAR_REVERSE = True
+
+# ----------------------------------------------------------------------
+# Plotting
+# ----------------------------------------------------------------------
+NOFLY_SLOWNESS_THRESHOLD = 10.0
+PLOT_FONT_FAMILY = "DejaVu Serif"
+PLOT_TITLE_SIZE = 16
+PLOT_LABEL_SIZE = 12
+PLOT_LEGEND_SIZE = 9
+PLOT_DPI = 250
+BASE_NODE_SIZE = 1.0
+PLOT_SHOW_BASE_MODEL = False
+HEATMAP_CMAP = "magma"
+HEATMAP_ALPHA = 1.0
+NORMAL_NODE_SIZE = 8.0
+CANDIDATE_STAR_SIZE = 220.0
+SYMBOL_EDGE_LINEWIDTH = 0.5
+CANDIDATE_EDGE_LINEWIDTH = 1.0
+PLOT_CANDIDATE_LABELS = False
+PLOT_AREA_QUOTA_LABELS = False
+
+# Edge density figure 01 colorbar and bold continuous-line control
+EDGE_DENSITY_PLOT_REMOVE_ZERO = True
+EDGE_LINEWIDTH_MIN = 1.50
+EDGE_LINEWIDTH_MAX = 5.00
+EDGE_ALPHA = 1.00
+EDGE_LINEWIDTH_POWER = 0.50
+
+EDGE_LINESTYLE = "solid"
+EDGE_CAPSTYLE = "round"
+EDGE_JOINSTYLE = "round"
+
+# ----------------------------------------------------------------------
+# Minor candidate option
+# ----------------------------------------------------------------------
+# Existing balanced candidates are treated as MAJOR candidates.
+# Minor candidates use a lower hit-count threshold to capture weaker outer
+# corridors and secondary intermediate nodes.
+ENABLE_MINOR_CANDIDATES = True
+MINOR_CANDIDATE_MIN_HIT_COUNT = 2
+MINOR_CANDIDATE_MAX_HIT_COUNT = 6
+MINOR_CANDIDATE_MIN_GRAPH_DEGREE = 2
+
+# Minor candidate area quota. This is intentionally smaller than major quota.
+MINOR_AREA_BASE_CANDIDATES_PER_ACTIVE_AREA = 1
+MINOR_AREA_EXTRA_CANDIDATES_MAX = 1
+MINOR_AREA_MAX_CANDIDATES_PER_AREA = 2
+
+# Minor candidates must not be too close to major candidates or each other.
+MINOR_CANDIDATE_MIN_SEPARATION_M = 250.0
+MINOR_CANDIDATE_MIN_SEPARATION_FROM_MAJOR_M = 250.0
+MINOR_CANDIDATE_RELAXED_MIN_SEPARATION_M = 150.0
+MINOR_CANDIDATE_RELAXED_MIN_SEPARATION_FROM_MAJOR_M = 150.0
+ALLOW_RELAXED_MINOR_SELECTION = True
+
+# Minor candidate scoring
+MINOR_CANDIDATE_SCORE_HIT_WEIGHT = 0.50
+MINOR_CANDIDATE_SCORE_DEGREE_WEIGHT = 0.25
+MINOR_CANDIDATE_SCORE_PAIR_WEIGHT = 0.20
+MINOR_CANDIDATE_SCORE_CLUSTER_WEIGHT = 0.05
+
+# Major/minor marker control
+MAJOR_CANDIDATE_MARKER = "*"
+MINOR_CANDIDATE_MARKER = "D"
+MINOR_CANDIDATE_MARKER_SIZE = 25.0
+MINOR_CANDIDATE_EDGE_LINEWIDTH = 0.15

@@ -1,0 +1,62 @@
+# ======================================================================
+# Random 2D node-riskmap parameters for LAE-UTM
+# File: params/2Dmap.params
+# ======================================================================
+
+# ----------------------------------------------------------------------
+# Map grid
+# ----------------------------------------------------------------------
+MAP_WIDTH_M = 5000.0
+MAP_HEIGHT_M = 5000.0
+GRID_DX_M = 50.0
+
+# ----------------------------------------------------------------------
+# Random obstacle field
+# ----------------------------------------------------------------------
+OBSTACLE_RATE = 0.20
+OBSTACLE_MIN_RADIUS_M = 80.0
+OBSTACLE_MAX_RADIUS_M = 350.0
+
+# ----------------------------------------------------------------------
+# Hard restricted airspace first
+# RA is generated before DB/DK/FLZ and is kept as hard no-fly.
+# ----------------------------------------------------------------------
+N_RA = 3
+RA_MIN_RADIUS_M = 250.0
+RA_MAX_RADIUS_M = 600.0
+
+# ----------------------------------------------------------------------
+# Service objectives placed after RA in remaining flyable space
+# ----------------------------------------------------------------------
+N_DB = 2
+N_DK = 6
+N_FLZ = 6
+OBJECTIVE_MIN_DIST_M = 400.0
+
+# ----------------------------------------------------------------------
+# FLZ placement
+# random        : original random FLZ placement after DB/DK
+# even_corridor : place FLZ near DB-DK guide corridors and spread them
+# ----------------------------------------------------------------------
+FLZ_PLACEMENT_MODE = "even_corridor"
+FLZ_CORRIDOR_MAX_DIST_M = 350.0
+FLZ_MIN_PAIR_DIST_M = 400.0
+FLZ_SPREAD_WEIGHT = 1.0
+FLZ_CORRIDOR_WEIGHT = 0.8
+FLZ_TERMINAL_WEIGHT = 0.25
+
+# ----------------------------------------------------------------------
+# Slowness / no-fly rule
+# ----------------------------------------------------------------------
+FLYABLE_SLOWNESS = 0.3
+NOFLY_SLOWNESS = 10.0
+
+# ----------------------------------------------------------------------
+# Reproducibility and output
+# SEED can be:
+#   SEED = 12          # fixed/reproducible
+#   SEED = "pc_time"   # new random seed from computer time every run
+# ----------------------------------------------------------------------
+SEED = "pc_time"
+OUTPUT_DIR = "output/01_random_node_map_seed_pc_time"
+OUTPUT_NAME = "random_2d_node_riskmap"

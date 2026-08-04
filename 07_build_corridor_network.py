@@ -1,0 +1,1361 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+07_build_corridor_network.py
+
+Version: v1
+
+Build the shared UAV corridor NETWORK: infrastructure only.
+
+  - network nodes: DB/DK objectives + major (optionally minor) traffic
+    nodes (TN) from output/03_clustering_hitcount/master_plan_input_nodes.csv.
+    Every node is a CIRCLE of NODE_CIRCLE_DIAMETER_M (50 m). Additional
+    BACKUP TNs (BAKxx, drawn purple) are suggested for the low-density
+    areas inside the network hull; their extra legs back up the network
+    when a primary corridor is unavailable
+  - MAXIMIZED connections: every node pair within LEG_MAX_LENGTH_M whose
+    straight line is obstacle-free becomes a connection (objective-TN,
+    objective-objective and TN-TN alike, e.g. DK05-DK03 directly without
+    an intermediate TN). Blocked K-nearest neighbors additionally get
+    one Theta* search, so any-angle turns appear only where an obstacle
+    forces them
+  - every connection carries 2 PARALLEL corridors of CORRIDOR_DIAMETER_M
+    (50 m): the two lane centerlines are the parallel EXTERNAL TANGENTS
+    of the end node circles -- symmetric +/-25 m offsets of the
+    connection centerline that touch the outside of each circle. No
+    perpendicular connector stubs anywhere; a vehicle flows from the
+    tangent line onto the node circle and out onto the next leg.
+    Where an obstacle blocks one symmetric offset side (e.g. the
+    DK02-DK05 no-fly gap), the whole pair is shifted sideways off the
+    centerline by the smallest clearing shift, separation preserved,
+    and the end node circles MOVE WITH their shifted corridors (average
+    demanded displacement per node) so the lanes stay tangent to the
+    circles; the network is then rebuilt from the moved nodes
+  - route drawings: for every objective pair A-B the shortest sequence
+    of legs over the network is drawn as one map
+    (figures/route_with_legs/A_to_B.png), showing how a path from A to
+    B rides through the intermediate legs of the overall network
+
+Planning actual UAV flights on the network is outside this work; the
+pair routes here only demonstrate that every A-B is reachable through
+the built legs.
+
+Run
+---
+    python 07_build_corridor_network.py --param-file params/corridor_network.params
+
+Main outputs
+------------
+    output/07_corridor_network/
+        network_nodes.csv       one row per network node (objective / TN)
+        network_legs.csv        one row per connection (type, length, lane report)
+        lane_nodes.csv          polyline points of both lanes of every connection
+        pair_routes.csv         leg sequence per objective pair (for the drawings)
+        figures/00_corridor_network.png          whole-network overview
+        figures/route_with_legs/<A>_to_<B>.png   route through intermediate legs
+"""
+
+from __future__ import annotations
+
+import argparse
+import heapq
+import importlib.util
+import math
+import sys
+from pathlib import Path
+from typing import Any
+
+import numpy as np
+import pandas as pd
+import matplotlib
+matplotlib.use("Agg")
+import matplotlib.pyplot as plt
+
+from src.maprule import add_map_rule
+from matplotlib.patches import Circle
+
+THIS_DIR = Path(__file__).resolve().parent
+
+VERSION = "v1"
+
+
+def _load_master06():
+    """Reuse 06's solver machinery (Theta* wrappers, soft-buffer lane
+    planner, model loading) without duplicating it."""
+    spec = importlib.util.spec_from_file_location("master06", THIS_DIR / "06_run_master_corridor_theta.py")
+    module = importlib.util.module_from_spec(spec)
+    sys.modules["master06"] = module
+    spec.loader.exec_module(module)
+    return module
+
+
+M6 = _load_master06()
+
+
+def parse_args() -> argparse.Namespace:
+    parser = argparse.ArgumentParser(description="Build the shared UAV corridor network.")
+    parser.add_argument("--param-file", default="params/corridor_network.params")
+    return parser.parse_args()
+
+
+# ======================================================================
+# Network nodes
+# ======================================================================
+
+def build_network_nodes(df: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    """Objectives (DB/DK) + TN candidates as one table with model indices."""
+    obj_prefixes = [str(p) for p in M6.pget(params, "NETWORK_OBJECTIVE_PREFIXES", ["DB", "DK"])]
+    include_minor = bool(M6.pget(params, "NETWORK_INCLUDE_MINOR_TN", True))
+
+    rows = []
+    is_obj = df["label_prefix"].astype(str).isin(obj_prefixes)
+    for idx in np.flatnonzero(is_obj.to_numpy()):
+        r = df.iloc[int(idx)]
+        rows.append({
+            "net_id": str(r["label"]),
+            "kind": "objective",
+            "label_prefix": str(r["label_prefix"]),
+            "model_idx": int(idx),
+            "x": float(r["x"]),
+            "y": float(r["y"]),
+        })
+
+    if "is_candidate" in df.columns:
+        cand_mask = df["is_candidate"].astype(bool)
+        for idx in np.flatnonzero(cand_mask.to_numpy()):
+            r = df.iloc[int(idx)]
+            level = str(r.get("candidate_type", "major"))
+            if level == "minor" and not include_minor:
+                continue
+            rows.append({
+                "net_id": str(r.get("candidate_id", f"TN{idx}")),
+                "kind": f"tn_{level}",
+                "label_prefix": "TN",
+                "model_idx": int(idx),
+                "x": float(r["x"]),
+                "y": float(r["y"]),
+            })
+
+    nodes = pd.DataFrame(rows).drop_duplicates(subset=["model_idx"]).reset_index(drop=True)
+    nodes.insert(0, "net_node", np.arange(len(nodes), dtype=int))
+    return nodes
+
+
+# ======================================================================
+# Geometry helpers
+# ======================================================================
+
+def make_nofly_tree(df: pd.DataFrame, params: dict[str, Any]):
+    nofly_thr = float(M6.pget(params, "NOFLY_SLOWNESS_THRESHOLD", 10.0))
+    nofly_xy = df.loc[df["slowness"].to_numpy(float) >= nofly_thr, ["x", "y"]].to_numpy(float)
+    if not len(nofly_xy):
+        return None
+    try:
+        from scipy.spatial import cKDTree
+        return cKDTree(nofly_xy)
+    except Exception:
+        return None
+
+
+def sample_min_clearance(xy: np.ndarray, nofly_tree, sample_m: float = 10.0) -> float:
+    """Minimum distance of a polyline to any no-fly node."""
+    if nofly_tree is None or len(xy) < 2:
+        return float("inf")
+    pts = M6._resample_polyline_m(xy, sample_m)
+    d, _ = nofly_tree.query(pts, k=1)
+    return float(np.min(d))
+
+
+def straight_line_clear(a_xy: np.ndarray, b_xy: np.ndarray, nofly_tree, clearance_m: float) -> bool:
+    return sample_min_clearance(np.vstack([a_xy, b_xy]), nofly_tree, sample_m=25.0) >= clearance_m
+
+
+def smooth_polyline_los(xy: np.ndarray, nofly_tree, clearance_m: float) -> np.ndarray:
+    """Greedy line-of-sight shortcutting: replace any staircase run of
+    grid waypoints with one straight segment as long as the straight
+    segment keeps clearance_m to every no-fly node. Kills the grid
+    zig-zag on Theta* detour legs so the offset lanes come out straight."""
+    if len(xy) <= 2:
+        return xy
+    out = [xy[0]]
+    i = 0
+    while i < len(xy) - 1:
+        j = len(xy) - 1
+        while j > i + 1:
+            if straight_line_clear(xy[i], xy[j], nofly_tree, clearance_m):
+                break
+            j -= 1
+        out.append(xy[j])
+        i = j
+    return np.asarray(out, dtype=float)
+
+
+def offset_polyline(xy: np.ndarray, signed_offset_m: float) -> np.ndarray | None:
+    """Parallel offset of a polyline (positive = left of travel direction)."""
+    try:
+        from shapely.geometry import LineString, MultiLineString
+    except Exception:
+        return None
+    if len(xy) < 2:
+        return None
+    line = LineString(xy)
+    off = None
+    try:
+        off = line.offset_curve(signed_offset_m, join_style="round")
+    except Exception:
+        try:
+            side = "left" if signed_offset_m >= 0 else "right"
+            off = line.parallel_offset(abs(signed_offset_m), side, join_style=2)
+        except Exception:
+            return None
+    if off is None or off.is_empty:
+        return None
+    if isinstance(off, MultiLineString) or off.geom_type == "MultiLineString":
+        off = max(off.geoms, key=lambda g: g.length)
+    oxy = np.asarray(off.coords, dtype=float)
+    if len(oxy) < 2:
+        return None
+    if np.hypot(*(oxy[0] - xy[0])) > np.hypot(*(oxy[-1] - xy[0])):
+        oxy = oxy[::-1]
+    return oxy
+
+
+# ======================================================================
+# Connections: maximized straight links, Theta* only against obstacles
+# ======================================================================
+
+def candidate_edges(nodes: pd.DataFrame, nofly_tree, params: dict[str, Any]) -> list[tuple[int, int, float, bool]]:
+    """(i, j, straight_m, straight_clear) candidate connections.
+
+    MAXIMIZED connectivity: EVERY node pair within LEG_MAX_LENGTH_M with
+    an obstacle-free straight line is a connection -- direct links like
+    DK05-DK03 or MAJ001-DK01 are never dropped just because the nodes
+    are not each other's nearest neighbors. Blocked pairs are only kept
+    for the LEG_KNN_K nearest neighbors (those get a Theta* detour), so
+    the detour count stays bounded.
+    """
+    k = int(M6.pget(params, "LEG_KNN_K", 5))
+    max_len = float(M6.pget(params, "LEG_MAX_LENGTH_M", 2500.0))
+    clearance_m = float(M6.pget(params, "LEG_CLEARANCE_M", 50.0))
+    xy = nodes[["x", "y"]].to_numpy(float)
+    n = len(xy)
+
+    d_all = np.hypot(xy[:, 0:1] - xy[None, :, 0], xy[:, 1:2] - xy[None, :, 1])
+
+    knn: set[tuple[int, int]] = set()
+    for i in range(n):
+        order = np.argsort(d_all[i])
+        picked = 0
+        for j in order:
+            j = int(j)
+            if j == i:
+                continue
+            if max_len > 0 and d_all[i, j] > max_len:
+                break
+            knn.add((min(i, j), max(i, j)))
+            picked += 1
+            if picked >= k:
+                break
+
+    out: list[tuple[int, int, float, bool]] = []
+    for i in range(n):
+        for j in range(i + 1, n):
+            dist = float(d_all[i, j])
+            if max_len > 0 and dist > max_len:
+                continue
+            clear = straight_line_clear(xy[i], xy[j], nofly_tree, clearance_m)
+            if clear or (i, j) in knn:
+                out.append((i, j, dist, clear))
+    return out
+
+
+def build_legs(
+    df: pd.DataFrame,
+    cell_to_idx: dict,
+    base_allowed: np.ndarray,
+    nodes: pd.DataFrame,
+    nofly_tree,
+    params: dict[str, Any],
+) -> pd.DataFrame:
+    """Materialize the connections.
+
+    Straight-clear connections become 2-waypoint straight legs (zero
+    turns). Blocked K-nearest ones get one Theta* search -- the
+    any-angle turns appear only where the obstacle forces them.
+    Detours longer than LEG_MAX_DETOUR_RATIO x straight are dropped.
+    """
+    detour_cap = float(M6.pget(params, "LEG_MAX_DETOUR_RATIO", 2.0))
+
+    rows = []
+    edges = candidate_edges(nodes, nofly_tree, params)
+    n_clear = sum(1 for e in edges if e[3])
+    print(f"Connections     : {len(edges)} candidate ({n_clear} straight-clear, {len(edges) - n_clear} need Theta*)")
+    for i, j, straight_m, clear in edges:
+        a = nodes.iloc[i]
+        b = nodes.iloc[j]
+        a_idx = int(a["model_idx"])
+        b_idx = int(b["model_idx"])
+        leg_id = f"{a['net_id']}__{b['net_id']}"
+
+        if clear:
+            rows.append({
+                "leg_id": leg_id,
+                "net_a": int(i), "net_b": int(j),
+                "a_id": str(a["net_id"]), "b_id": str(b["net_id"]),
+                "leg_type": "straight",
+                "length_m": straight_m,
+                "straight_m": straight_m,
+                "path_indices": [a_idx, b_idx],
+                "path_xy": np.array([[float(a["x"]), float(a["y"])], [float(b["x"]), float(b["y"])]]),
+            })
+            continue
+
+        result = M6.run_project_theta(
+            base_model=df, cell_to_idx=cell_to_idx, base_allowed_mask=base_allowed,
+            start_idx=a_idx, end_idx=b_idx, params=params, route_name=f"leg_{leg_id}",
+        )
+        if not result.get("success", False):
+            print(f"  drop {leg_id}: Theta* failed ({result.get('message','')})")
+            continue
+        path = [int(v) for v in result.get("path_indices", [])]
+        # Local optimization: shortcut the raw grid staircase so the leg
+        # centerline (and its offset lanes) run straight between the
+        # genuinely forced turns.
+        xy_path = np.array(M6._route_xy(df, path), dtype=float, copy=True)
+        # Theta* starts/ends on the grid cell of model_idx; a node moved
+        # off its grid cell (node shift pass) still anchors the leg.
+        xy_path[0] = [float(a["x"]), float(a["y"])]
+        xy_path[-1] = [float(b["x"]), float(b["y"])]
+        smooth_clear = float(M6.pget(params, "LEG_SMOOTH_CLEARANCE_M", clearance_m := float(M6.pget(params, "LEG_CLEARANCE_M", 50.0))))
+        if bool(M6.pget(params, "LEG_SMOOTH_ENABLE", True)):
+            xy_path = smooth_polyline_los(xy_path, nofly_tree, smooth_clear)
+        length_m = float(np.hypot(np.diff(xy_path[:, 0]), np.diff(xy_path[:, 1])).sum())
+        if detour_cap > 0 and length_m > detour_cap * straight_m:
+            print(f"  drop {leg_id}: detour {length_m:.0f} m > {detour_cap:.1f} x straight {straight_m:.0f} m")
+            continue
+        rows.append({
+            "leg_id": leg_id,
+            "net_a": int(i), "net_b": int(j),
+            "a_id": str(a["net_id"]), "b_id": str(b["net_id"]),
+            "leg_type": "theta",
+            "length_m": float(length_m),
+            "straight_m": straight_m,
+            "path_indices": path,
+            "path_xy": xy_path,
+        })
+
+    legs = pd.DataFrame(rows)
+    if len(legs):
+        n_straight = int((legs["leg_type"] == "straight").sum())
+        print(f"Built           : {len(legs)} connections ({n_straight} straight, {len(legs) - n_straight} theta)")
+    return legs
+
+
+# ======================================================================
+# Crossing filter: corridors may only meet at network nodes
+# ======================================================================
+#
+# The maximized all-pairs connections produce direct lines that CROSS
+# other connections in mid-air, away from any node -- an unmanaged
+# corridor intersection. Two rules restore network hygiene:
+#
+#   1. a connection whose centerline crosses (or collinearly overlaps)
+#      an already-kept connection is skipped;
+#   2. a connection that flies straight over the circle of an
+#      intermediate network node WITHOUT stopping there is skipped --
+#      the traffic belongs on the two shorter legs via that node.
+#
+# Shorter connections are kept first, so crossings always resolve in
+# favor of the local legs and the dropped ones are the long redundant
+# diagonals. Crossings that happen AT a shared node (touching
+# endpoints) are of course allowed -- that is what the nodes are for.
+
+def filter_crossing_legs(legs: pd.DataFrame, df: pd.DataFrame, nodes: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    if not bool(M6.pget(params, "LEG_SKIP_CROSSING", True)) or not len(legs):
+        return legs
+    try:
+        from shapely.geometry import LineString, Point
+    except Exception:
+        print("[WARN] shapely unavailable -- crossing filter skipped")
+        return legs
+
+    node_r = 0.5 * float(M6.pget(params, "NODE_CIRCLE_DIAMETER_M", 50.0))
+
+    geoms: dict[int, Any] = {}
+    for idx, leg in legs.iterrows():
+        xy = np.asarray(leg["path_xy"], dtype=float) if "path_xy" in leg.index else M6._route_xy(df, [int(v) for v in leg["path_indices"]])
+        geoms[int(idx)] = LineString(xy)
+
+    n_flyover = 0
+    n_crossing = 0
+    kept_idx: list[int] = []
+    kept_geoms: list[Any] = []
+    for idx in legs.sort_values("length_m").index:
+        leg = legs.loc[idx]
+        geom = geoms[int(idx)]
+
+        # Rule 2: no flying over an intermediate node's circle.
+        endpoint_ids = {int(leg["net_a"]), int(leg["net_b"])}
+        flyover = False
+        for _, nd in nodes.iterrows():
+            if int(nd["net_node"]) in endpoint_ids:
+                continue
+            if geom.distance(Point(float(nd["x"]), float(nd["y"]))) < node_r:
+                print(f"  skip {leg['leg_id']}: flies over intermediate node {nd['net_id']}")
+                flyover = True
+                break
+        if flyover:
+            n_flyover += 1
+            continue
+
+        # Rule 1: no crossing / collinear overlap with kept connections.
+        conflict = None
+        for kept_i, kg in zip(kept_idx, kept_geoms):
+            if geom.crosses(kg) or geom.overlaps(kg):
+                conflict = str(legs.loc[kept_i, "leg_id"])
+                break
+        if conflict is not None:
+            print(f"  skip {leg['leg_id']}: crosses {conflict}")
+            n_crossing += 1
+            continue
+
+        kept_idx.append(int(idx))
+        kept_geoms.append(geom)
+
+    print(f"Crossing filter : kept {len(kept_idx)}, skipped {n_crossing} crossing + {n_flyover} node-flyover connections")
+    return legs.loc[sorted(kept_idx)].reset_index(drop=True)
+
+
+# ======================================================================
+# Two parallel tangent lanes per connection
+# ======================================================================
+#
+# Every node is a circle of NODE_CIRCLE_DIAMETER_M (50 m). The two lane
+# centerlines of a leg are the parallel EXTERNAL TANGENTS of the end
+# circles: symmetric +/- (diameter/2 = 25 m) offsets of the connection
+# centerline. An offset at exactly the circle radius touches the circle
+# tangentially at the perpendicular foot -- so the lanes flow onto the
+# node circles with NO perpendicular connector stubs, and the two
+# centerlines sit 50 m apart along the whole leg.
+
+def tangent_lane_pair(xy_c: np.ndarray, half_sep_m: float, half_w: float, nofly_tree, shift_m: float = 0.0) -> tuple[np.ndarray | None, np.ndarray | None]:
+    xy_a = offset_polyline(xy_c, +half_sep_m + shift_m)
+    xy_b = offset_polyline(xy_c, -half_sep_m + shift_m)
+    if xy_a is None or xy_b is None:
+        return None, None
+    if sample_min_clearance(xy_a, nofly_tree) < half_w or sample_min_clearance(xy_b, nofly_tree) < half_w:
+        return None, None
+    return xy_a, xy_b
+
+
+def shifted_lane_pair(
+    xy_c: np.ndarray, half_sep_m: float, half_w: float, nofly_tree, params: dict[str, Any],
+) -> tuple[np.ndarray | None, np.ndarray | None, float]:
+    """Slide the whole lane pair sideways when the symmetric tangent
+    pair is blocked (e.g. DK02-DK05: the centerline threads a narrow
+    no-fly gap off-center, so one +/- offset side has no room). Both
+    lanes keep the full 2*half_sep_m separation; the pair is just
+    shifted off the centerline by the smallest shift that clears the
+    obstacles on both sides."""
+    max_shift = float(M6.pget(params, "LANE_SHIFT_MAX_M", 100.0))
+    step = float(M6.pget(params, "LANE_SHIFT_STEP_M", 5.0))
+    n = int(max_shift / step)
+    for k in range(1, n + 1):
+        for s in (k * step, -k * step):
+            xy_a, xy_b = tangent_lane_pair(xy_c, half_sep_m, half_w, nofly_tree, shift_m=s)
+            if xy_a is not None:
+                return xy_a, xy_b, s
+    return None, None, float("nan")
+
+
+def compute_node_shifts(
+    nodes: pd.DataFrame,
+    legs: pd.DataFrame,
+    lane_report: pd.DataFrame,
+    nofly_tree,
+    params: dict[str, Any],
+) -> pd.DataFrame | None:
+    """Move node circles along with their shifted corridors.
+
+    A shifted lane pair is no longer tangent to the end node circles --
+    one lane floats off the circle, the other cuts through it. Each
+    shifted leg therefore demands a lateral displacement of
+    lane_shift_m * left-normal at both of its end nodes; a node moves
+    by the AVERAGE demand of its shifted legs (unshifted legs keep
+    their tangency through the rebuild that follows). Moves are capped
+    at NODE_SHIFT_MAX_M and skipped when the moved circle would touch a
+    no-fly node. Returns the moved nodes table, or None if nothing
+    moved."""
+    max_shift = float(M6.pget(params, "NODE_SHIFT_MAX_M", 50.0))
+    node_r = 0.5 * float(M6.pget(params, "NODE_CIRCLE_DIAMETER_M", 50.0))
+
+    shift_by_leg: dict[str, float] = {}
+    for r in lane_report.itertuples():
+        s = float(getattr(r, "lane_shift_m", 0.0))
+        if str(getattr(r, "lane_b_method", "")) == "shifted_pair" and math.isfinite(s) and s != 0.0:
+            shift_by_leg[str(r.leg_id)] = s
+    if not shift_by_leg:
+        return None
+
+    demands: dict[int, list[np.ndarray]] = {}
+    for _, leg in legs.iterrows():
+        s = shift_by_leg.get(str(leg["leg_id"]))
+        if s is None:
+            continue
+        xy = np.asarray(leg["path_xy"], dtype=float)
+        for node_i, t in ((int(leg["net_a"]), xy[1] - xy[0]), (int(leg["net_b"]), xy[-1] - xy[-2])):
+            norm_t = float(np.hypot(*t))
+            if norm_t < 1.0e-9:
+                continue
+            left_n = np.array([-t[1], t[0]]) / norm_t
+            demands.setdefault(node_i, []).append(s * left_n)
+
+    out = nodes.copy()
+    n_moved = 0
+    for node_i, vecs in demands.items():
+        v = np.mean(vecs, axis=0)
+        norm = float(np.hypot(*v))
+        if norm < 1.0:
+            continue
+        if norm > max_shift:
+            v *= max_shift / norm
+        row = out.index[out["net_node"] == node_i][0]
+        new_c = np.array([float(out.at[row, "x"]), float(out.at[row, "y"])]) + v
+        if nofly_tree is not None:
+            d, _ = nofly_tree.query(new_c, k=1)
+            if float(d) < node_r:
+                print(f"  keep {out.at[row, 'net_id']}: moved circle would touch a no-fly node")
+                continue
+        out.at[row, "x"] = float(new_c[0])
+        out.at[row, "y"] = float(new_c[1])
+        out.at[row, "node_shift_m"] = float(np.hypot(
+            float(new_c[0]) - float(out.at[row, "x_orig"]),
+            float(new_c[1]) - float(out.at[row, "y_orig"]),
+        ))
+        print(f"  move {out.at[row, 'net_id']}: node circle follows its shifted corridors by {float(np.hypot(*v)):.1f} m")
+        n_moved += 1
+    return out if n_moved else None
+
+
+def measure_lane_separation(xy_a: np.ndarray, xy_b: np.ndarray, params: dict[str, Any]) -> dict[str, Any]:
+    """Clearance profile between the two lane centerlines."""
+    step_m = float(M6.pget(params, "BUFFER_SAMPLE_STEP_M", 10.0))
+    min_sep = float(M6.pget(params, "MIN_CENTERLINE_SEPARATION_M", 50.0))
+
+    ref = M6._resample_polyline_m(xy_a, step_m)
+    _, dist, side = M6.compute_clearance_profile(ref, xy_b)
+    crossings = M6.detect_crossing_points(ref, dist, side)
+    return {
+        "centerline_min_separation_m": float(dist.min()) if len(dist) else float("nan"),
+        "separation_ok": bool(not (dist < min_sep - 1.0).any() and len(crossings) == 0),
+        "n_narrow_samples": int((dist < min_sep - 1.0).sum()),
+        "n_crossings": int(len(crossings)),
+    }
+
+
+def build_leg_lanes(
+    df: pd.DataFrame,
+    cell_to_idx: dict,
+    base_allowed: np.ndarray,
+    legs: pd.DataFrame,
+    nofly_tree,
+    params: dict[str, Any],
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Two parallel tangent lanes per connection.
+
+    Fallbacks when one symmetric offset side is blocked by an obstacle:
+    first the whole pair is shifted sideways off the centerline
+    (separation preserved) by the smallest clearing shift; if no shift
+    within LANE_SHIFT_MAX_M works, lane A stays on the centerline and
+    lane B comes from the dual-parallel soft-buffer search (06)."""
+    min_sep = float(M6.pget(params, "MIN_CENTERLINE_SEPARATION_M", 50.0))
+    half_sep = 0.5 * min_sep
+    half_w = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))
+    params = dict(params)
+    params["BUFFER_TARGET_M"] = min_sep
+
+    lane_rows = []
+    report_rows = []
+    for _, leg in legs.iterrows():
+        path1 = [int(v) for v in leg["path_indices"]]
+        xy_c = np.asarray(leg["path_xy"], dtype=float) if "path_xy" in leg.index else M6._route_xy(df, path1)
+
+        xy_a, xy_b = tangent_lane_pair(xy_c, half_sep, half_w, nofly_tree)
+        method = "tangent_pair" if xy_a is not None else ""
+        shift_m = 0.0
+
+        if xy_a is None:
+            # One tangent side blocked: shift the whole pair sideways.
+            xy_a, xy_b, shift_m = shifted_lane_pair(xy_c, half_sep, half_w, nofly_tree, params)
+            if xy_a is not None:
+                method = "shifted_pair"
+                print(f"  shift {leg['leg_id']}: lane pair moved {shift_m:+.0f} m off the centerline")
+
+        if xy_a is None:
+            # No clearing shift either: centerline + soft-buffer parallel.
+            shift_m = float("nan")
+            xy_a = xy_c
+            result = M6.make_parallel_route_soft_buffer(
+                df=df, cell_to_idx=cell_to_idx, base_allowed=base_allowed,
+                start_idx=path1[0], end_idx=path1[-1], main_path=path1,
+                params=params, route_name=f"laneB_{leg['leg_id']}",
+            )
+            ok = bool(result.get("success", False)) and not bool(result.get("duplicated_from_main", False))
+            xy_b = M6._route_xy(df, [int(v) for v in result.get("path_indices", [])]) if ok else None
+            method = "centerline+soft_buffer" if ok else "single_lane"
+
+        for seq, (x, y) in enumerate(xy_a):
+            lane_rows.append({"leg_id": leg["leg_id"], "lane": "A", "seq": seq, "x": float(x), "y": float(y)})
+        if xy_b is not None:
+            for seq, (x, y) in enumerate(xy_b):
+                lane_rows.append({"leg_id": leg["leg_id"], "lane": "B", "seq": seq, "x": float(x), "y": float(y)})
+            sep_stats = measure_lane_separation(xy_a, xy_b, params)
+            lane_b_len = float(np.hypot(np.diff(xy_b[:, 0]), np.diff(xy_b[:, 1])).sum())
+        else:
+            sep_stats = {
+                "centerline_min_separation_m": float("nan"),
+                "separation_ok": False, "n_narrow_samples": np.nan, "n_crossings": np.nan,
+            }
+            lane_b_len = float("nan")
+
+        report_rows.append({
+            "leg_id": leg["leg_id"],
+            "two_lanes": xy_b is not None,
+            "lane_b_method": method,
+            "lane_shift_m": shift_m,
+            "lane_b_length_m": lane_b_len,
+            **sep_stats,
+        })
+    return pd.DataFrame(lane_rows), pd.DataFrame(report_rows)
+
+
+# ======================================================================
+# Backup TN suggestion: purple TNs for the low-density areas
+# ======================================================================
+
+def suggest_backup_tn(
+    df: pd.DataFrame,
+    nodes: pd.DataFrame,
+    legs: pd.DataFrame,
+    nofly_tree,
+    params: dict[str, Any],
+) -> pd.DataFrame:
+    """Suggest ADDITIONAL TN nodes (net_id BAKxx, drawn PURPLE) in the
+    low-density areas of the built network: flyable cells inside the
+    network's convex hull that are far from every node and corridor
+    centerline, with enough no-fly clearance for a node circle and its
+    corridors. Connected like any other node on the rebuild, they open
+    extra legs that back up the network when a primary corridor is
+    unavailable."""
+    n_max = int(M6.pget(params, "BACKUP_TN_MAX", 6))
+    min_net = float(M6.pget(params, "BACKUP_TN_MIN_NETWORK_DIST_M", 600.0))
+    min_clear = float(M6.pget(params, "BACKUP_TN_CLEARANCE_M", 100.0))
+    spacing = float(M6.pget(params, "BACKUP_TN_SPACING_M", 800.0))
+    nofly_thr = float(M6.pget(params, "NOFLY_SLOWNESS_THRESHOLD", 10.0))
+    if n_max <= 0:
+        return nodes
+
+    try:
+        from scipy.spatial import cKDTree
+    except Exception:
+        print("[WARN] scipy unavailable -- backup TN suggestion skipped")
+        return nodes
+
+    net_pts = [nodes[["x", "y"]].to_numpy(float)]
+    for _, leg in legs.iterrows():
+        net_pts.append(M6._resample_polyline_m(np.asarray(leg["path_xy"], dtype=float), 50.0))
+    net_tree = cKDTree(np.vstack(net_pts))
+
+    fly_pos = np.flatnonzero(df["slowness"].to_numpy(float) < nofly_thr)
+    xy = df.iloc[fly_pos][["x", "y"]].to_numpy(float)
+    d_net, _ = net_tree.query(xy, k=1)
+    d_nofly = nofly_tree.query(xy, k=1)[0] if nofly_tree is not None else np.full(len(xy), np.inf)
+
+    # Only INSIDE the network's hull: the goal is redundancy between the
+    # existing corridors, not expansion beyond them.
+    try:
+        from shapely.geometry import MultiPoint, Point
+        hull = MultiPoint(nodes[["x", "y"]].to_numpy(float).tolist()).convex_hull
+        inside = np.array([hull.contains(Point(float(px), float(py))) for px, py in xy])
+    except Exception:
+        nx0, nx1 = float(nodes["x"].min()), float(nodes["x"].max())
+        ny0, ny1 = float(nodes["y"].min()), float(nodes["y"].max())
+        inside = (xy[:, 0] >= nx0) & (xy[:, 0] <= nx1) & (xy[:, 1] >= ny0) & (xy[:, 1] <= ny1)
+
+    ok = (d_net >= min_net) & (d_nofly >= min_clear) & inside
+    rows: list[dict[str, Any]] = []
+    for k in np.argsort(-d_net):
+        if not ok[k]:
+            continue
+        p = xy[k]
+        if any(float(np.hypot(p[0] - r["x"], p[1] - r["y"])) < spacing for r in rows):
+            continue
+        rows.append({
+            "net_id": f"BAK{len(rows) + 1:02d}",
+            "kind": "tn_backup",
+            "label_prefix": "TN",
+            "model_idx": int(fly_pos[k]),
+            "x": float(p[0]),
+            "y": float(p[1]),
+            "x_orig": float(p[0]),
+            "y_orig": float(p[1]),
+            "node_shift_m": 0.0,
+            "gap_to_network_m": float(d_net[k]),
+        })
+        if len(rows) >= n_max:
+            break
+    if not rows:
+        return nodes
+    for r in rows:
+        print(f"  suggest {r['net_id']}: ({r['x']:.0f}, {r['y']:.0f}), {r['gap_to_network_m']:.0f} m from the nearest node/corridor")
+    out = pd.concat([nodes, pd.DataFrame(rows)], ignore_index=True)
+    out["net_node"] = np.arange(len(out), dtype=int)
+    return out
+
+
+def suggest_expansion_tn(
+    df: pd.DataFrame,
+    nodes: pd.DataFrame,
+    legs: pd.DataFrame,
+    nofly_tree,
+    params: dict[str, Any],
+) -> pd.DataFrame:
+    """Open up the unused flyable space OUTSIDE the network hull.
+
+    Farthest-point sampling: repeatedly take the flyable cell farthest
+    from the growing network (nodes, corridor centerlines and already
+    suggested TNs) that still has EXPANSION_TN_CLEARANCE_M to the
+    no-fly fields and lies within EXPANSION_TN_MAX_LINK_M of a node, so
+    a leg can actually reach it. Sampling stops when every outside
+    pocket is within EXPANSION_TN_MIN_DIST_M of the network. The picks
+    (net_id EXTxx, drawn MAGENTA) join the rebuild like any other node
+    and pull corridors into the previously unused space; chains of EXT
+    TNs can walk far out because each pick only needs to link to the
+    network grown so far."""
+    n_max = int(M6.pget(params, "EXPANSION_TN_MAX", 8))
+    min_dist = float(M6.pget(params, "EXPANSION_TN_MIN_DIST_M", 700.0))
+    min_clear = float(M6.pget(params, "EXPANSION_TN_CLEARANCE_M", 100.0))
+    max_link = float(M6.pget(params, "EXPANSION_TN_MAX_LINK_M", float(M6.pget(params, "LEG_MAX_LENGTH_M", 2500.0))))
+    nofly_thr = float(M6.pget(params, "NOFLY_SLOWNESS_THRESHOLD", 10.0))
+    if n_max <= 0:
+        return nodes
+
+    try:
+        from scipy.spatial import cKDTree
+    except Exception:
+        print("[WARN] scipy unavailable -- expansion TN suggestion skipped")
+        return nodes
+
+    net_pts = [nodes[["x", "y"]].to_numpy(float)]
+    for _, leg in legs.iterrows():
+        net_pts.append(M6._resample_polyline_m(np.asarray(leg["path_xy"], dtype=float), 50.0))
+    net_xy = np.vstack(net_pts)
+    link_xy = nodes[["x", "y"]].to_numpy(float)
+
+    fly_pos = np.flatnonzero(df["slowness"].to_numpy(float) < nofly_thr)
+    xy = df.iloc[fly_pos][["x", "y"]].to_numpy(float)
+    d_nofly = nofly_tree.query(xy, k=1)[0] if nofly_tree is not None else np.full(len(xy), np.inf)
+
+    try:
+        from shapely.geometry import MultiPoint, Point
+        hull = MultiPoint(nodes[["x", "y"]].to_numpy(float).tolist()).convex_hull
+        outside = ~np.array([hull.contains(Point(float(px), float(py))) for px, py in xy])
+    except Exception:
+        print("[WARN] shapely unavailable -- expansion TN suggestion skipped")
+        return nodes
+
+    base_ok = (d_nofly >= min_clear) & outside
+    rows: list[dict[str, Any]] = []
+    while len(rows) < n_max:
+        d_net, _ = cKDTree(net_xy).query(xy, k=1)
+        d_link, _ = cKDTree(link_xy).query(xy, k=1)
+        ok = base_ok & (d_net >= min_dist) & (d_link <= max_link)
+        if not ok.any():
+            break
+        k = int(np.argmax(np.where(ok, d_net, -1.0)))
+        p = xy[k]
+        rows.append({
+            "net_id": f"EXT{len(rows) + 1:02d}",
+            "kind": "tn_ext",
+            "label_prefix": "TN",
+            "model_idx": int(fly_pos[k]),
+            "x": float(p[0]),
+            "y": float(p[1]),
+            "x_orig": float(p[0]),
+            "y_orig": float(p[1]),
+            "node_shift_m": 0.0,
+            "gap_to_network_m": float(d_net[k]),
+        })
+        net_xy = np.vstack([net_xy, p[None, :]])
+        link_xy = np.vstack([link_xy, p[None, :]])
+    if not rows:
+        return nodes
+    for r in rows:
+        print(f"  suggest {r['net_id']}: ({r['x']:.0f}, {r['y']:.0f}), opens space {r['gap_to_network_m']:.0f} m outside the network")
+    out = pd.concat([nodes, pd.DataFrame(rows)], ignore_index=True)
+    out["net_node"] = np.arange(len(out), dtype=int)
+    return out
+
+
+# ======================================================================
+# Pair routes over the network (for the route_with_legs drawings)
+# ======================================================================
+
+def dijkstra(adjacency: dict[int, list[tuple[int, float, int]]], src: int, dst: int) -> tuple[list[int], list[int]]:
+    dist = {src: 0.0}
+    prev: dict[int, tuple[int, int]] = {}
+    pq = [(0.0, src)]
+    seen: set[int] = set()
+    while pq:
+        d, u = heapq.heappop(pq)
+        if u in seen:
+            continue
+        seen.add(u)
+        if u == dst:
+            break
+        for v, w, leg_row in adjacency.get(u, []):
+            nd = d + w
+            if nd < dist.get(v, float("inf")):
+                dist[v] = nd
+                prev[v] = (u, leg_row)
+                heapq.heappush(pq, (nd, v))
+    if dst not in seen:
+        return [], []
+    node_seq = [dst]
+    leg_seq: list[int] = []
+    u = dst
+    while u != src:
+        p, leg_row = prev[u]
+        leg_seq.append(leg_row)
+        node_seq.append(p)
+        u = p
+    return node_seq[::-1], leg_seq[::-1]
+
+
+def assign_pair_routes(nodes: pd.DataFrame, legs: pd.DataFrame, params: dict[str, Any]) -> pd.DataFrame:
+    """Shortest leg sequence for every objective pair (drawing only --
+    it demonstrates A-to-B reachability through the intermediate legs)."""
+    adjacency: dict[int, list[tuple[int, float, int]]] = {}
+    for row_i, leg in legs.iterrows():
+        a, b, w = int(leg["net_a"]), int(leg["net_b"]), float(leg["length_m"])
+        adjacency.setdefault(a, []).append((b, w, int(row_i)))
+        adjacency.setdefault(b, []).append((a, w, int(row_i)))
+
+    objectives = nodes[nodes["kind"] == "objective"].reset_index(drop=True)
+    skip_same_prefix = bool(M6.pget(params, "SKIP_SAME_PREFIX", False))
+
+    rows = []
+    for i in range(len(objectives)):
+        for j in range(i + 1, len(objectives)):
+            a = objectives.iloc[i]
+            b = objectives.iloc[j]
+            if skip_same_prefix and str(a["label_prefix"]) == str(b["label_prefix"]):
+                continue
+            pair_name = f"{a['net_id']}_to_{b['net_id']}"
+            node_seq, leg_seq = dijkstra(adjacency, int(a["net_node"]), int(b["net_node"]))
+            if not node_seq:
+                rows.append({"pair": pair_name, "success": False, "n_legs": 0, "length_m": np.nan, "via": "", "leg_rows": [], "leg_forward": []})
+                continue
+            # Traversal direction per leg: lane sides are stored relative
+            # to the leg's net_a -> net_b orientation, so a leg entered at
+            # net_b is ridden in reverse and its left/right lanes swap.
+            leg_forward = [bool(int(legs.iloc[k]["net_a"]) == int(node_seq[i])) for i, k in enumerate(leg_seq)]
+            rows.append({
+                "pair": pair_name,
+                "success": True,
+                "n_legs": len(leg_seq),
+                "length_m": float(sum(float(legs.iloc[k]["length_m"]) for k in leg_seq)),
+                "via": "-".join(str(nodes.iloc[n]["net_id"]) for n in node_seq),
+                "leg_rows": leg_seq,
+                "leg_forward": leg_forward,
+            })
+    return pd.DataFrame(rows)
+
+
+# ======================================================================
+# Plotting
+# ======================================================================
+
+def _corridor_patches(ax, xy: np.ndarray, half_width_m: float, color: str) -> None:
+    """Filled transparent corridor + gray boundary around one centerline."""
+    if xy is None or len(xy) < 2:
+        return
+    try:
+        from shapely.geometry import LineString
+        poly = LineString(xy).buffer(half_width_m, cap_style="round", join_style="round")
+        geoms = getattr(poly, "geoms", [poly])
+        for g in geoms:
+            bx, by = g.exterior.xy
+            ax.fill(bx, by, color=color, alpha=0.18, linewidth=0, zorder=8)
+            ax.plot(bx, by, color="gray", linewidth=0.9, alpha=0.9, zorder=9)
+    except Exception:
+        ax.plot(xy[:, 0], xy[:, 1], color=color, alpha=0.18, linewidth=8.0, zorder=8)
+
+
+def _node_circle_patches(ax, nodes: pd.DataFrame, radius_m: float, emphasize: set[str] | None = None) -> None:
+    """Node circles (Ø 2*radius_m): the lanes are tangent to these."""
+    for _, r in nodes.iterrows():
+        strong = emphasize is not None and str(r["net_id"]) in emphasize
+        ax.add_patch(Circle(
+            (float(r["x"]), float(r["y"])), radius_m,
+            facecolor="purple", alpha=0.22 if strong else 0.10,
+            edgecolor="black" if strong else "gray",
+            linewidth=1.2 if strong else 0.7, zorder=13,
+        ))
+
+
+def _lane_xy(lanes: pd.DataFrame, leg_id: str, lane: str) -> np.ndarray:
+    g = lanes[(lanes["leg_id"] == leg_id) & (lanes["lane"] == lane)].sort_values("seq")
+    return g[["x", "y"]].to_numpy(float)
+
+
+def _plot_nodes(ax, nodes: pd.DataFrame, labels: bool = True, fontsize: float = 7.0) -> None:
+    for kind, marker, color, size, label in [
+        ("objective", None, None, 110, None),
+        ("tn_major", "D", "teal", 70, "TN major"),
+        ("tn_minor", "d", "turquoise", 40, "TN minor"),
+        ("tn_backup", "D", "purple", 90, "TN backup (suggested)"),
+        ("tn_ext", "D", "magenta", 90, "TN extension (suggested)"),
+    ]:
+        sub = nodes[nodes["kind"] == kind]
+        if not len(sub):
+            continue
+        if kind == "objective":
+            db = sub[sub["label_prefix"] == "DB"]
+            dk = sub[sub["label_prefix"] == "DK"]
+            ax.scatter(db["x"], db["y"], marker="^", s=size, c="blue", edgecolors="white", linewidths=0.8, label="DB", zorder=20)
+            ax.scatter(dk["x"], dk["y"], marker="s", s=size, c="green", edgecolors="white", linewidths=0.8, label="DK", zorder=20)
+        else:
+            ax.scatter(sub["x"], sub["y"], marker=marker, s=size, c=color, edgecolors="white", linewidths=0.6, label=label, zorder=19)
+        if labels:
+            for _, r in sub.iterrows():
+                ax.text(r["x"], r["y"], str(r["net_id"]), fontsize=fontsize, weight="bold", zorder=21)
+
+
+def _resample_n(xy: np.ndarray, n: int = 60) -> np.ndarray:
+    seg = np.hypot(*np.diff(xy, axis=0).T)
+    s = np.concatenate([[0.0], np.cumsum(seg)])
+    t = np.linspace(0.0, float(s[-1]), n)
+    return np.column_stack([np.interp(t, s, xy[:, 0]), np.interp(t, s, xy[:, 1])])
+
+
+def travel_left_right_lanes(lanes: pd.DataFrame, leg_id: str, forward: bool) -> tuple[np.ndarray, np.ndarray]:
+    """(left_lane, right_lane) of the TRAVEL direction, decided
+    GEOMETRICALLY -- not by the stored A/B label. Tangent-pair legs have
+    lane A on the left of their stored orientation, but soft-buffer
+    fallback legs keep lane A on the centerline with lane B on an
+    arbitrary side, so the label alone mis-colors those legs (and the
+    lane would appear to jump sides mid-route). The sign of the cross
+    product at mid-leg is authoritative for every lane construction."""
+    xy_a = _lane_xy(lanes, leg_id, "A")
+    xy_b = _lane_xy(lanes, leg_id, "B")
+    if not forward:
+        xy_a = xy_a[::-1] if len(xy_a) else xy_a
+        xy_b = xy_b[::-1] if len(xy_b) else xy_b
+    if len(xy_a) < 2 or len(xy_b) < 2:
+        return xy_a, xy_b
+    ra = _resample_n(xy_a)
+    rb = _resample_n(xy_b)
+    center = 0.5 * (ra + rb)
+    m = len(center) // 2
+    t = center[min(m + 1, len(center) - 1)] - center[max(m - 1, 0)]
+    side_a = float(t[0] * (ra[m] - center[m])[1] - t[1] * (ra[m] - center[m])[0])
+    return (xy_a, xy_b) if side_a >= 0.0 else (xy_b, xy_a)
+
+
+def _arc_between(center: np.ndarray, p1: np.ndarray, p2: np.ndarray, step_deg: float = 6.0) -> np.ndarray:
+    """Arc around `center` from p1 to p2 (shorter angular direction).
+
+    Radii may differ slightly (e.g. a soft-buffer lane ending at the node
+    center meets a tangent lane at 25 m): the radius is blended linearly
+    along the arc, giving a short spiral instead of a jump."""
+    v1 = p1 - center
+    v2 = p2 - center
+    r1 = float(np.hypot(*v1))
+    r2 = float(np.hypot(*v2))
+    if r1 < 1.0e-6 or r2 < 1.0e-6:
+        return np.empty((0, 2), dtype=float)
+    a1 = math.atan2(v1[1], v1[0])
+    a2 = math.atan2(v2[1], v2[0])
+    da = (a2 - a1 + math.pi) % (2.0 * math.pi) - math.pi
+    n = max(int(abs(da) / math.radians(step_deg)) + 2, 2)
+    ang = a1 + np.linspace(0.0, da, n)
+    rad = np.linspace(r1, r2, n)
+    return np.column_stack([center[0] + rad * np.cos(ang), center[1] + rad * np.sin(ang)])
+
+
+def _miter_point(p0: np.ndarray, p1: np.ndarray, q0: np.ndarray, q1: np.ndarray, max_ext_m: float = 60.0) -> np.ndarray | None:
+    """Intersection of segment p0-p1 with q0-q1, allowing a short
+    extension (p beyond p1 / q before q0, up to max_ext_m) so slightly
+    gapped inner corners still miter."""
+    r = p1 - p0
+    s = q1 - q0
+    denom = float(r[0] * s[1] - r[1] * s[0])
+    lr = float(np.hypot(*r))
+    ls = float(np.hypot(*s))
+    if abs(denom) < 1.0e-9 or lr < 1.0e-9 or ls < 1.0e-9:
+        return None
+    qp = q0 - p0
+    t = float(qp[0] * s[1] - qp[1] * s[0]) / denom
+    u = float(qp[0] * r[1] - qp[1] * r[0]) / denom
+    if 0.0 <= t <= 1.0 + max_ext_m / lr and -max_ext_m / ls <= u <= 1.0:
+        return p0 + t * r
+    return None
+
+
+def _join_lane_chains(cur: np.ndarray, nxt: np.ndarray, node_c: np.ndarray) -> np.ndarray:
+    """Join two consecutive same-side lanes at a node.
+
+    INNER side of a turn: the incoming and outgoing lane lines cross
+    near the node -- trimming both to their intersection (miter/corner
+    cut) is the continuous path; arcing between the tangent feet there
+    would loop backwards through the node circle. OUTER side (and
+    straight-through): the lines do not cross, so an arc fillet around
+    the node circle bridges them."""
+    if len(cur) >= 2 and len(nxt) >= 2:
+        pt = _miter_point(cur[-2], cur[-1], nxt[0], nxt[1])
+        if pt is not None:
+            return np.vstack([cur[:-1], pt[None, :], nxt[1:]])
+    arc = _arc_between(node_c, cur[-1], nxt[0])
+    return np.vstack([cur, arc, nxt])
+
+
+def build_route_lane_chains(
+    lanes: pd.DataFrame,
+    leg_ids: list[str],
+    leg_forward: list[bool],
+    via_xy: list[np.ndarray],
+) -> tuple[list[np.ndarray], list[np.ndarray]]:
+    """One CONTINUOUS polyline per travel side for a whole route.
+
+    Consecutive legs' same-side lanes are joined at the intermediate
+    node (via_xy[i] = the node between leg i-1 and leg i): the inner
+    lane of a turn cuts the corner at the lane-line intersection, the
+    outer lane wraps the node circle with an arc fillet. The vehicle
+    never visits the TN center and never doubles back -- it just keeps
+    moving along its side. A missing lane (single-lane leg) breaks that
+    side's chain into separate pieces."""
+    left_parts: list[np.ndarray] = []
+    right_parts: list[np.ndarray] = []
+    left_cur: np.ndarray | None = None
+    right_cur: np.ndarray | None = None
+
+    for i, (leg_id, fwd) in enumerate(zip(leg_ids, leg_forward)):
+        left_xy, right_xy = travel_left_right_lanes(lanes, leg_id, fwd)
+
+        if left_cur is not None and len(left_xy):
+            left_cur = _join_lane_chains(left_cur, left_xy, via_xy[i])
+        elif len(left_xy):
+            left_cur = left_xy
+
+        if len(right_xy) < 2:
+            if right_cur is not None:
+                right_parts.append(right_cur)
+                right_cur = None
+        elif right_cur is not None:
+            right_cur = _join_lane_chains(right_cur, right_xy, via_xy[i])
+        else:
+            right_cur = right_xy
+
+    if left_cur is not None:
+        left_parts.append(left_cur)
+    if right_cur is not None:
+        right_parts.append(right_cur)
+    return left_parts, right_parts
+
+
+def _draw_leg_corridors(ax, lanes: pd.DataFrame, leg_id: str, half_w: float, lw: float = 1.6, forward: bool = True) -> None:
+    """Draw one leg's corridors: red = geometric LEFT lane of the travel
+    direction, blue = right lane, so the sides stay stable along a whole
+    multi-leg route regardless of stored leg orientation or lane
+    construction method."""
+    left_xy, right_xy = travel_left_right_lanes(lanes, leg_id, forward)
+    _corridor_patches(ax, left_xy, half_w, "red")
+    if len(left_xy):
+        ax.plot(left_xy[:, 0], left_xy[:, 1], "-", color="red", linewidth=lw, zorder=12)
+    if len(right_xy):
+        _corridor_patches(ax, right_xy, half_w, "blue")
+        ax.plot(right_xy[:, 0], right_xy[:, 1], "-", color="blue", linewidth=lw, zorder=12)
+
+
+def plot_route_with_legs(
+    df: pd.DataFrame,
+    nodes: pd.DataFrame,
+    legs: pd.DataFrame,
+    lanes: pd.DataFrame,
+    route: pd.Series,
+    out: Path,
+    params: dict[str, Any],
+) -> None:
+    """One objective pair: the path from A to B drawn through all its
+    intermediate legs of the overall network."""
+    half_w = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))
+    node_r = 0.5 * float(M6.pget(params, "NODE_CIRCLE_DIAMETER_M", 50.0))
+    nofly_thr = float(M6.pget(params, "NOFLY_SLOWNESS_THRESHOLD", 10.0))
+
+    leg_rows = [int(k) for k in route["leg_rows"]]
+    leg_forward = [bool(v) for v in route.get("leg_forward", [True] * len(leg_rows))]
+    route_legs = legs.iloc[leg_rows]
+
+    pts = []
+    for _, leg in route_legs.iterrows():
+        for lane in ("A", "B"):
+            xy = _lane_xy(lanes, leg["leg_id"], lane)
+            if len(xy):
+                pts.append(xy)
+    if not pts:
+        return
+    all_xy = np.vstack(pts)
+    margin = 350.0
+    x0, x1 = all_xy[:, 0].min() - margin, all_xy[:, 0].max() + margin
+    y0, y1 = all_xy[:, 1].min() - margin, all_xy[:, 1].max() + margin
+
+    fig, ax = plt.subplots(figsize=(10, 9))
+
+    in_box = (df["x"] >= x0) & (df["x"] <= x1) & (df["y"] >= y0) & (df["y"] <= y1)
+    sub = df[in_box]
+    nofly = sub["slowness"].to_numpy(float) >= nofly_thr
+    ax.scatter(sub.loc[~nofly, "x"], sub.loc[~nofly, "y"], s=3, c="lightgray", alpha=0.5, linewidths=0, label="flyable", zorder=1)
+    ax.scatter(sub.loc[nofly, "x"], sub.loc[nofly, "y"], s=6, c="black", alpha=0.85, linewidths=0, label="no-fly", zorder=2)
+
+    # Other network legs in the window, faint, for context.
+    in_window = set()
+    for _, leg in legs.iterrows():
+        if leg["leg_id"] in set(route_legs["leg_id"]):
+            continue
+        xy = _lane_xy(lanes, leg["leg_id"], "A")
+        if len(xy) and (xy[:, 0] > x0).any() and (xy[:, 0] < x1).any() and (xy[:, 1] > y0).any() and (xy[:, 1] < y1).any():
+            ax.plot(xy[:, 0], xy[:, 1], "-", color="gray", linewidth=0.6, alpha=0.35, zorder=4)
+            in_window.add(leg["leg_id"])
+
+    # Continuous rails: consecutive same-side lanes joined by arcs around
+    # the intermediate node circles -- no center visit, no doubling back.
+    via_id_seq = [s for s in str(route["via"]).split("-")]
+    node_by_id = {str(r["net_id"]): np.array([float(r["x"]), float(r["y"])]) for _, r in nodes.iterrows()}
+    via_xy = [node_by_id.get(v, np.zeros(2)) for v in via_id_seq]
+    left_parts, right_parts = build_route_lane_chains(
+        lanes, [str(l) for l in route_legs["leg_id"]], leg_forward, via_xy,
+    )
+    for part in left_parts:
+        _corridor_patches(ax, part, half_w, "red")
+        ax.plot(part[:, 0], part[:, 1], "-", color="red", linewidth=1.8, zorder=12)
+    for part in right_parts:
+        _corridor_patches(ax, part, half_w, "blue")
+        ax.plot(part[:, 0], part[:, 1], "-", color="blue", linewidth=1.8, zorder=12)
+
+    via_ids = set(str(route["via"]).split("-"))
+    node_box = nodes[(nodes["x"] >= x0) & (nodes["x"] <= x1) & (nodes["y"] >= y0) & (nodes["y"] <= y1)]
+    _node_circle_patches(ax, node_box, node_r, emphasize=via_ids)
+    _plot_nodes(ax, node_box, labels=True, fontsize=8.0)
+
+    ax.plot([], [], "-", color="red", linewidth=1.8, label="left lane (A->B travel)")
+    ax.plot([], [], "-", color="blue", linewidth=1.8, label="right lane (A->B travel)")
+    ax.plot([], [], "-", color="gray", linewidth=0.9, label="corridor boundary")
+    ax.plot([], [], "-", color="gray", linewidth=0.6, alpha=0.5, label="other legs")
+
+    ax.set_title(
+        f"{route['pair']}  ({route['n_legs']} legs, {float(route['length_m']):.0f} m)\n"
+        f"via {route['via']}",
+        fontweight="bold", fontsize=11,
+    )
+    ax.set_xlim(x0, x1)
+    ax.set_ylim(y0, y1)
+    ax.set_xlabel("X coordinate (m)")
+    ax.set_ylabel("Y coordinate (m)")
+    ax.set_aspect("equal", adjustable="box")
+    add_map_rule(ax)
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="best", fontsize=7.5, frameon=True)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=int(M6.pget(params, "LEG_FIGURE_DPI", 160)))
+    plt.close(fig)
+
+
+def plot_network(df: pd.DataFrame, nodes: pd.DataFrame, legs: pd.DataFrame, lanes: pd.DataFrame, out: Path, params: dict[str, Any]) -> None:
+    """Whole-network overview with the same corridor styling."""
+    half_w = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))
+    node_r = 0.5 * float(M6.pget(params, "NODE_CIRCLE_DIAMETER_M", 50.0))
+    nofly_thr = float(M6.pget(params, "NOFLY_SLOWNESS_THRESHOLD", 10.0))
+    fig, ax = plt.subplots(figsize=(13, 12))
+
+    slow = df["slowness"].to_numpy(float)
+    nofly = slow >= nofly_thr
+    ax.scatter(df.loc[~nofly, "x"], df.loc[~nofly, "y"], s=2, c="lightgray", alpha=0.4, linewidths=0, label="flyable", zorder=1)
+    ax.scatter(df.loc[nofly, "x"], df.loc[nofly, "y"], s=4, c="black", alpha=0.8, linewidths=0, label="no-fly", zorder=2)
+
+    for _, leg in legs.iterrows():
+        _draw_leg_corridors(ax, lanes, leg["leg_id"], half_w, lw=1.0)
+
+    _node_circle_patches(ax, nodes, node_r)
+    _plot_nodes(ax, nodes, labels=True, fontsize=6.5)
+    if "node_shift_m" in nodes.columns:
+        moved = nodes[nodes["node_shift_m"] > 0]
+        for _, r in moved.iterrows():
+            ax.plot([r["x_orig"], r["x"]], [r["y_orig"], r["y"]], "-", color="purple", linewidth=0.8, zorder=14)
+            ax.scatter([r["x_orig"]], [r["y_orig"]], marker="x", s=30, c="purple", linewidths=1.0, zorder=14)
+        if len(moved):
+            ax.scatter([], [], marker="x", s=30, c="purple", label="node before shift")
+    ax.plot([], [], "-", color="red", linewidth=1.6, label="lane A centerline")
+    ax.plot([], [], "-", color="blue", linewidth=1.6, label="lane B centerline")
+    ax.plot([], [], "-", color="gray", linewidth=0.9, label="corridor boundary")
+
+    ax.set_title(
+        f"UAV corridor network {VERSION}: maximized objective/TN connections, "
+        f"2 tangent lanes Ø{2 * half_w:.0f} m per connection",
+        fontweight="bold",
+    )
+    ax.set_xlabel("X coordinate (m)")
+    ax.set_ylabel("Y coordinate (m)")
+    ax.set_aspect("equal", adjustable="box")
+    add_map_rule(ax)
+    ax.grid(True, alpha=0.25)
+    ax.legend(loc="upper right", fontsize=8, frameon=True)
+    fig.tight_layout()
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.savefig(out, dpi=int(M6.pget(params, "PLOT_DPI", 250)))
+    plt.close(fig)
+
+
+# ======================================================================
+# Main
+# ======================================================================
+
+def main() -> None:
+    args = parse_args()
+    params = M6.load_params(args.param_file)
+
+    model_file = Path(str(M6.pget(params, "MODEL_FILE", "output/03_clustering_hitcount/master_plan_input_nodes.csv")))
+    output_dir = Path(str(M6.pget(params, "OUTPUT_DIR", "output/07_corridor_network")))
+    fig_dir = output_dir / "figures"
+    route_fig_dir = fig_dir / "route_with_legs"
+    output_dir.mkdir(parents=True, exist_ok=True)
+    fig_dir.mkdir(parents=True, exist_ok=True)
+
+    print("=" * 80)
+    print(f"UAV CORRIDOR NETWORK BUILDER {VERSION}")
+    print("=" * 80)
+    print(f"Param file      : {args.param_file}")
+    print(f"Model file      : {model_file}")
+    print(f"Output directory: {output_dir}")
+
+    nofly_threshold = float(M6.pget(params, "NOFLY_SLOWNESS_THRESHOLD", 10.0))
+    df = M6.read_node_model(model_file)
+    df, cell_to_idx, grid_m = M6.add_grid_index(df)
+    base_allowed = df["slowness"].to_numpy(float) < nofly_threshold
+    print(f"Model nodes     : {len(df):,} (grid {grid_m:.1f} m, {int((~base_allowed).sum()):,} no-fly)")
+
+    nodes = build_network_nodes(df, params)
+    nodes["x_orig"] = nodes["x"]
+    nodes["y_orig"] = nodes["y"]
+    nodes["node_shift_m"] = 0.0
+    n_obj = int((nodes["kind"] == "objective").sum())
+    print(f"Network nodes   : {len(nodes)} ({n_obj} objectives, {len(nodes) - n_obj} TN)")
+
+    nofly_tree = make_nofly_tree(df, params)
+
+    def build_network(nodes: pd.DataFrame) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
+        legs = build_legs(df, cell_to_idx, base_allowed, nodes, nofly_tree, params)
+        if not len(legs):
+            raise RuntimeError("No connections could be built -- check LEG_KNN_K / LEG_MAX_LENGTH_M.")
+        legs = filter_crossing_legs(legs, df, nodes, params)
+        lanes, lane_report = build_leg_lanes(df, cell_to_idx, base_allowed, legs, nofly_tree, params)
+        return legs, lanes, lane_report
+
+    legs, lanes, lane_report = build_network(nodes)
+
+    # Suggested TNs: purple backup TNs fill the low-density areas
+    # INSIDE the network hull (redundancy when a primary corridor is
+    # unavailable); magenta extension TNs open up the unused flyable
+    # space OUTSIDE the hull. Both join the rebuild like normal nodes.
+    n_before = len(nodes)
+    if bool(M6.pget(params, "BACKUP_TN_ENABLE", True)):
+        nodes = suggest_backup_tn(df, nodes, legs, nofly_tree, params)
+        n_bak = len(nodes) - n_before
+        if n_bak:
+            print(f"Backup TN       : {n_bak} purple TNs suggested in low-density areas")
+    if bool(M6.pget(params, "EXPANSION_TN_ENABLE", True)):
+        n_mid = len(nodes)
+        nodes = suggest_expansion_tn(df, nodes, legs, nofly_tree, params)
+        n_ext = len(nodes) - n_mid
+        if n_ext:
+            print(f"Expansion TN    : {n_ext} magenta TNs suggested outside the network hull")
+    if len(nodes) > n_before:
+        print("Suggested TN    : rebuilding network with the suggested nodes")
+        legs, lanes, lane_report = build_network(nodes)
+        # A suggestion no leg could reach (blocked straight lines, Theta*
+        # detour too long) stays useless: drop it and rebuild.
+        used = set(legs["a_id"].astype(str)) | set(legs["b_id"].astype(str))
+        orphan = nodes[nodes["kind"].isin(["tn_backup", "tn_ext"]) & ~nodes["net_id"].isin(used)]
+        if len(orphan):
+            print(f"  drop {', '.join(orphan['net_id'])}: no connection could be built")
+            nodes = nodes[~nodes["net_id"].isin(set(orphan["net_id"]))].reset_index(drop=True)
+            nodes["net_node"] = np.arange(len(nodes), dtype=int)
+            legs, lanes, lane_report = build_network(nodes)
+
+    # Shifted corridors take their end nodes with them: the node circle
+    # moves by the average demanded displacement so the lanes stay
+    # tangent to it, then the whole network is rebuilt from the moved
+    # nodes (which usually turns the shifted pairs back into symmetric
+    # tangent pairs).
+    if bool(M6.pget(params, "NODE_SHIFT_ENABLE", True)):
+        for _ in range(int(M6.pget(params, "NODE_SHIFT_MAX_PASSES", 2))):
+            moved = compute_node_shifts(nodes, legs, lane_report, nofly_tree, params)
+            if moved is None:
+                break
+            nodes = moved
+            n_m = int((nodes["node_shift_m"] > 0).sum())
+            print(f"Node shift      : {n_m} node circles moved with their corridors -- rebuilding network")
+            legs, lanes, lane_report = build_network(nodes)
+
+    two = int(lane_report["two_lanes"].sum())
+    sep_ok = int(lane_report["separation_ok"].fillna(False).astype(bool).sum())
+    n_tangent = int((lane_report["lane_b_method"] == "tangent_pair").sum())
+    n_shifted = int((lane_report["lane_b_method"] == "shifted_pair").sum())
+    print(
+        f"Corridor lanes  : {two}/{len(lane_report)} with 2 parallel corridors "
+        f"({n_tangent} tangent pairs, {n_shifted} shifted pairs, "
+        f"{two - n_tangent - n_shifted} soft-buffer), {sep_ok} meet full separation"
+    )
+
+    for prefix, what in (("BAK", "backup"), ("EXT", "extension")):
+        n_sugg = int(legs["a_id"].astype(str).str.startswith(prefix).sum()
+                     + legs["b_id"].astype(str).str.startswith(prefix).sum())
+        if n_sugg:
+            print(f"{what.capitalize():<8} legs   : {n_sugg} connections ride through the suggested {what} TNs")
+
+    pair_routes = assign_pair_routes(nodes, legs, params)
+    n_routed = int(pair_routes["success"].sum())
+    print(f"Pair routes     : {n_routed}/{len(pair_routes)} objective pairs reachable through the legs")
+
+    legs_out = legs.drop(columns=["path_indices", "path_xy"]).merge(lane_report, on="leg_id", how="left")
+    nodes.to_csv(output_dir / "network_nodes.csv", index=False)
+    legs_out.to_csv(output_dir / "network_legs.csv", index=False)
+    lanes.to_csv(output_dir / "lane_nodes.csv", index=False)
+    pair_routes_out = pair_routes.copy()
+    pair_routes_out["legs"] = pair_routes_out["leg_rows"].apply(lambda ks: ";".join(str(legs.iloc[int(k)]["leg_id"]) for k in ks))
+    pair_routes_out["leg_directions"] = pair_routes_out["leg_forward"].apply(lambda fs: ";".join("fwd" if f else "rev" for f in fs))
+    pair_routes_out.drop(columns=["leg_rows", "leg_forward"]).to_csv(output_dir / "pair_routes.csv", index=False)
+
+    plot_network(df, nodes, legs, lanes, fig_dir / "00_corridor_network.png", params)
+
+    if bool(M6.pget(params, "SAVE_ROUTE_FIGURES", True)):
+        route_fig_dir.mkdir(parents=True, exist_ok=True)
+        n_drawn = 0
+        for _, route in pair_routes.iterrows():
+            if not bool(route["success"]):
+                continue
+            plot_route_with_legs(df, nodes, legs, lanes, route, route_fig_dir / f"{route['pair']}.png", params)
+            n_drawn += 1
+        print(f"Route figures   : {n_drawn} saved to {route_fig_dir}")
+
+    print("-" * 80)
+    for name in ["network_nodes.csv", "network_legs.csv", "lane_nodes.csv", "pair_routes.csv"]:
+        print(f"Saved: {output_dir / name}")
+    print(f"Figure: {fig_dir / '00_corridor_network.png'}")
+    print("DONE")
+    print("=" * 80)
+
+
+if __name__ == "__main__":
+    main()

@@ -1,0 +1,329 @@
+# ======================================================================
+# KMeans route-hit-density traffic-node candidate parameters
+# Version: v11_candidate_clearance_shift
+# ======================================================================
+
+PARAM_SET_TAG = "v11_candidate_clearance_shift"  # VISIBLE VERSION TAG - 2026-07-01
+
+# ----------------------------------------------------------------------
+# Inputs
+# ----------------------------------------------------------------------
+# Raw whole-map node model. Expected common columns are:
+#   x y z slowness label label_prefix
+# Header or no-header whitespace/CSV files are both accepted.
+MODEL_FILE = "output/01_random_node_map/random_2d_node_riskmap_seed1.xyz"
+
+# Route CSVs from the Theta* master planner.
+# You may use one glob string or a list of glob strings.
+# Preferred v5 input: the consolidated Theta* edge table.
+# This table already stores the correct route step order:
+#   route_key, edge_seq, from_node_id, to_node_id, x1, y1, x2, y2, edge_distance_m
+# The script reconstructs one route from each route_key. If route_key is missing,
+# it splits the file whenever edge_seq starts again from 0 or decreases.
+USE_ROUTE_EDGE_FILE = True
+ROUTE_EDGE_FILE = "output/02_thetastar_master_plan/all_route_edges_v4.csv"
+REQUIRE_ROUTE_EDGE_FILE = False
+EDGE_FILE_DISABLE_LEGACY_FALLBACK = True
+
+# Legacy fallback only. Used only when USE_ROUTE_EDGE_FILE=False or when the edge
+# file is missing and EDGE_FILE_DISABLE_LEGACY_FALLBACK=False.
+ROUTE_CSV_GLOBS = [
+    "output/02_thetastar_master_plan/*.csv",
+    "output/02_thetastar_master_plan/**/*.csv",
+]
+
+OUTPUT_DIR = "output/04_kmean_route_hit_density"
+
+# ----------------------------------------------------------------------
+# Coordinate handling
+# ----------------------------------------------------------------------
+# auto  : detect lon/lat degree coordinates and internally convert to meters
+# meter : treat x/y directly as projected meters
+# lonlat: treat x/y as lon/lat degrees and convert to local meters
+XY_MODE = "auto"       # auto | meter | lonlat
+
+# Route/model coordinate column candidates.
+# The script tries these names case-insensitively.
+X_COLUMN_CANDIDATES = ["x", "lon", "longitude", "path_x", "node_x", "east", "easting"]
+Y_COLUMN_CANDIDATES = ["y", "lat", "latitude", "path_y", "node_y", "north", "northing"]
+Z_COLUMN_CANDIDATES = ["z", "alt", "height", "z_m", "z_agl", "z_msl"]
+SLOWNESS_COLUMN_CANDIDATES = ["slowness", "slow", "cost", "cost_s_per_m"]
+LABEL_COLUMN_CANDIDATES = ["label", "name", "node_label"]
+LABEL_PREFIX_COLUMN_CANDIDATES = ["label_prefix", "prefix", "type", "class"]
+
+# If a route file does not have x/y columns, the script tries these node-index
+# columns and maps them back to MODEL_FILE row positions.
+ROUTE_INDEX_COLUMN_CANDIDATES = ["node_idx", "node_index", "idx", "index", "model_idx"]
+ROUTE_INDEX_LIST_COLUMN_CANDIDATES = ["path_indices", "path_node_indices", "route_indices"]
+ROUTE_INDEX_BASE = "auto"     # auto | zero | one
+
+# ----------------------------------------------------------------------
+# v5 edge-table route cutting
+# ----------------------------------------------------------------------
+# Primary grouping logic v6:
+#   1) use route_key only as a BASE key;
+#   2) inside each route_key, split a new route when edge_seq resets/decreases;
+#   3) reconstruct each sub-route in original CSV row order.
+# This fixes the case where route_key = forward_main_01 contains many OD routes.
+ROUTE_KEY_COLUMN_CANDIDATES = [
+    "route_key", "route_id", "path_key", "path_id", "pair_key",
+    "label_pair", "route_name", "pair_name", "od_key",
+]
+ROUTE_EDGE_SEQ_COLUMN_CANDIDATES = ["edge_seq", "seq", "edge_order"]
+ROUTE_EDGE_X1_COLUMN_CANDIDATES = ["x1", "from_x", "x_from"]
+ROUTE_EDGE_Y1_COLUMN_CANDIDATES = ["y1", "from_y", "y_from"]
+ROUTE_EDGE_X2_COLUMN_CANDIDATES = ["x2", "to_x", "x_to"]
+ROUTE_EDGE_Y2_COLUMN_CANDIDATES = ["y2", "to_y", "y_to"]
+ROUTE_EDGE_DISTANCE_COLUMN_CANDIDATES = ["edge_distance_m", "distance_m", "edge_length_m"]
+
+# v6 route build-up. Keep file order after cutting by edge_seq reset.
+# Do not sort the whole route_key by edge_seq, because route_key can contain
+# many routes with repeated edge_seq = 0..N.
+ROUTE_EDGE_ORDER_MODE = "file_order_after_reset_split"  # file_order_after_reset_split | edge_seq
+ROUTE_EDGE_SPLIT_ON_NODE_DISCONTINUITY = False
+ROUTE_EDGE_FROM_NODE_COLUMN_CANDIDATES = ["from_node_id", "from_idx", "from_node", "node1"]
+ROUTE_EDGE_TO_NODE_COLUMN_CANDIDATES = ["to_node_id", "to_idx", "to_node", "node2"]
+
+# Ordered edge sanity check. A real route should have x2/y2 of edge i close to
+# x1/y1 of edge i+1 after sorting by edge_seq.
+ROUTE_EDGE_CONNECT_TOLERANCE_M = 2.0
+REJECT_DISCONNECTED_ROUTE_EDGES = True
+
+# ----------------------------------------------------------------------
+# Strict route geometry reading / validation
+# ----------------------------------------------------------------------
+# v5 fix: all_route_edges_v4.csv is read by route_key and edge_seq first. This avoids
+# accidentally reading summary-table columns such as start_x, end_x, center_x,
+# candidate_x, etc. as ordered route polylines. Wrong route grouping/columns would affect
+# both plotted route lines and route-hit-density values.
+ROUTE_X_COLUMN_CANDIDATES = [
+    "route_x", "route_lon", "path_x", "path_lon", "node_x", "node_lon",
+    "x", "lon", "longitude", "x_m", "path_x_m", "route_x_m", "node_x_m",
+    "x_original", "easting", "east",
+]
+ROUTE_Y_COLUMN_CANDIDATES = [
+    "route_y", "route_lat", "path_y", "path_lat", "node_y", "node_lat",
+    "y", "lat", "latitude", "y_m", "path_y_m", "route_y_m", "node_y_m",
+    "y_original", "northing", "north",
+]
+ROUTE_ORDER_COLUMN_CANDIDATES = [
+    "path_order", "route_order", "point_order", "node_order",
+    "step", "seq", "sequence", "i",
+]
+
+# auto       : infer route coordinate mode from column names/values
+# follow_model: force route x/y to use the same coordinate mode as MODEL_FILE
+# meter      : route x/y are already metric/local-meter coordinates
+# lonlat     : route x/y are lon/lat degrees
+ROUTE_XY_MODE = "auto"      # auto | follow_model | meter | lonlat
+
+VALIDATE_ROUTE_GEOMETRY = True
+MIN_ROUTE_UNIQUE_POINTS = 2
+ROUTE_MIN_PATH_LENGTH_M = 1.0
+ROUTE_MODEL_BBOX_MARGIN_M = 1000.0
+ROUTE_MIN_FRACTION_INSIDE_MODEL_BBOX = 0.95
+
+# Optional jump check. Keep False for Theta*/LOS-smoothed paths, because a real
+# smoothed path can have long straight segments. Set True only for debugging
+# unordered route CSVs.
+REJECT_ROUTES_WITH_LONG_JUMPS = False
+ROUTE_MAX_SEGMENT_M = 3000.0
+
+# ----------------------------------------------------------------------
+# Node exclusion / flyability rules
+# ----------------------------------------------------------------------
+# Exclude objective/restricted labels from candidate traffic nodes.
+EXCLUDE_LABEL_PREFIXES = ["DB", "DK", "FLZ", "RA"]
+EXCLUDE_LABELS = []
+
+# Recommended for your current LAE-UTM model: slowness >= 10 is hard no-fly.
+USE_ONLY_FLYABLE_MODEL_NODES = True
+NOFLY_SLOWNESS_THRESHOLD = 10.0
+NOFLY_THRESHOLD_MODE = "greater_equal"   # greater_equal | greater | equal
+
+# ----------------------------------------------------------------------
+# Route hit-density calculation
+# ----------------------------------------------------------------------
+# A raw model node receives +1 hit for each route passing within this buffer.
+# Hits are counted once per route per node, not once per densified route sample.
+HIT_BUFFER_M = 300.0
+
+# Densify route polylines before buffer querying so long route segments do not
+# under-count nearby nodes. Use <= HIT_BUFFER_M / 4 for stable results.
+ROUTE_DENSIFY_STEP_M = 50.0
+
+# Very tiny/invalid route files are ignored.
+MIN_ROUTE_POINTS = 2
+
+# ----------------------------------------------------------------------
+# KMeans candidate selection
+# ----------------------------------------------------------------------
+KMEANS_RANDOM_STATE = 42
+KMEANS_N_INIT = 20
+KMEANS_MAX_ITER = 300
+
+# Major candidates: high-density connection nodes.
+# Manual mode:
+#   N_MAJOR_CANDIDATES > 0 or N_MINOR_CANDIDATES > 0 -> use these values directly.
+# Auto-percentage mode:
+#   N_MAJOR_CANDIDATES = 0 and N_MINOR_CANDIDATES = 0 -> calculate both counts
+#   from AUTO_*_COUNT_PERCENT below.
+N_MAJOR_CANDIDATES = 12
+MAJOR_MIN_HIT_COUNT = 2
+MAJOR_HIT_PERCENTILE = 80.0      # used if MAJOR_MIN_HIT_COUNT gives too few nodes
+
+# Minor candidates: backup/coverage nodes. These help when major nodes alone do
+# not cover the whole map/route network.
+N_MINOR_CANDIDATES = 20
+MINOR_POOL_MODE = "all_eligible" # all_eligible | hit_positive | percentile
+MINOR_MIN_HIT_COUNT = 1
+MINOR_HIT_PERCENTILE = 40.0
+
+# v8 automatic candidate counts. These are used only when:
+#   N_MAJOR_CANDIDATES = 0
+#   N_MINOR_CANDIDATES = 0
+# Percent values are true percentages, not fractions.
+# Example: 0.20 means 0.20% of the selected base.
+# Count base options:
+#   eligible     : all eligible candidate nodes
+#   hit_positive : eligible nodes with route_hit_count > 0
+#   pool         : the current KMeans candidate pool after threshold filtering
+AUTO_MAJOR_COUNT_PERCENT = 0.20
+AUTO_MAJOR_COUNT_BASE = "hit_positive"   # eligible | hit_positive | pool
+AUTO_MAJOR_MIN_CANDIDATES = 3
+AUTO_MAJOR_MAX_CANDIDATES = 40
+AUTO_MAJOR_FALLBACK_CANDIDATES = 8
+
+AUTO_MINOR_COUNT_PERCENT = 0.15
+AUTO_MINOR_COUNT_BASE = "eligible"       # eligible | hit_positive | pool
+AUTO_MINOR_MIN_CANDIDATES = 5
+AUTO_MINOR_MAX_CANDIDATES = 80
+AUTO_MINOR_FALLBACK_CANDIDATES = 12
+
+# Keep selected candidate nodes separated. Minor candidates are also kept away
+# from already selected major candidates.
+CANDIDATE_MIN_SEPARATION_M = 300.0
+
+# Weight high route-hit nodes more strongly during KMeans.
+# sample_weight = 1 + hit_count ** HIT_WEIGHT_POWER
+HIT_WEIGHT_POWER = 1.0
+
+# Representative node inside each KMeans cluster.
+# max_hit_then_center: node with highest hit_count, tie = closest to cluster center
+# nearest_center      : nearest raw model node to cluster center
+REPRESENTATIVE_METHOD = "max_hit_then_center"
+
+# ----------------------------------------------------------------------
+# Candidate clearance correction near no-fly / obstacle zones
+# ----------------------------------------------------------------------
+# KMeans may select a high-density node too close to no-fly/obstacle cells.
+# This optional post-processing step shifts such candidates to a nearby
+# eligible node with more surrounding free space. If no better nearby node
+# exists, the original candidate is kept.
+ENABLE_CANDIDATE_CLEARANCE_SHIFT = True
+CANDIDATE_MIN_NOFLY_CLEARANCE_M = 150.0
+CANDIDATE_SHIFT_SEARCH_RADIUS_M = 600.0
+
+# Use the normal candidate separation by default during shifting.
+CANDIDATE_SHIFT_MIN_SEPARATION_M = 300.0
+CANDIDATE_SHIFT_ENFORCE_CANDIDATE_SEPARATION = True
+
+# True means replacements must meet CANDIDATE_MIN_NOFLY_CLEARANCE_M.
+# False means any node with improved clearance can be used.
+CANDIDATE_SHIFT_REQUIRE_CLEARANCE_TARGET = True
+
+# 1.0 allows shifting to a safer node even if route_hit_count drops to zero.
+# 0.5 means reject alternatives losing more than 50% of the original hit count.
+CANDIDATE_SHIFT_MAX_HIT_LOSS_FRACTION = 1.0
+
+# Scoring among valid nearby replacement nodes:
+#   score = clearance_weight * clearance_score
+#         + hit_weight * hit_score
+#         - distance_penalty * shift_distance_score
+CANDIDATE_SHIFT_CLEARANCE_WEIGHT = 1.0
+CANDIDATE_SHIFT_HIT_WEIGHT = 0.25
+CANDIDATE_SHIFT_DISTANCE_PENALTY = 0.20
+
+# ----------------------------------------------------------------------
+# Outputs / plotting
+# ----------------------------------------------------------------------
+SAVE_NODE_HIT_TABLE = True
+SAVE_ROUTE_SUMMARY_TABLE = True
+SAVE_CANDIDATE_TABLE = True
+SAVE_NODE_OBJECTIVE_CANDIDATE_TABLE = True
+
+# Output whole-map node/objective/candidate table:
+#   output/04_kmean_route_hit_density/all_model_nodes_objective_TNcandidates.csv
+OBJECTIVE_LABEL_PREFIXES = ["DB", "DK", "FLZ", "RA"]
+
+MAKE_FIGURES = True
+FIGURE_DPI = 220
+PLOT_ROUTE_LINES = True
+PLOT_MAX_ROUTES = 300
+PLOT_NODE_SIZE = 8
+PLOT_CANDIDATE_SIZE_MAJOR = 110
+PLOT_CANDIDATE_SIZE_MINOR = 70
+
+# Figure 02: KMeans candidate display controls.
+# Keep 02_kmean_major_minor_candidates.png but control what appears on it.
+PLOT_KMEAN_MAJOR_CANDIDATES = True
+PLOT_KMEAN_MINOR_CANDIDATES = True
+
+# Candidate labels can be turned on/off here.
+PLOT_KMEAN_CANDIDATE_LABELS = True
+PLOT_KMEAN_MAJOR_LABELS = True
+PLOT_KMEAN_MINOR_LABELS = True
+
+# Label options:
+#   candidate_id      -> TN001, TN002, ...
+#   candidate_id_hit  -> TN001 (route_hit_count)
+#   hit_count         -> route_hit_count only
+#   any candidate-table column name, e.g. model_index or route_hit_count
+PLOT_KMEAN_CANDIDATE_LABEL_FIELD = "candidate_id"
+PLOT_KMEAN_CANDIDATE_LABEL_FONTSIZE = 7.0
+PLOT_KMEAN_CANDIDATE_LABEL_DX = 0.0
+PLOT_KMEAN_CANDIDATE_LABEL_DY = 0.0
+PLOT_KMEAN_CANDIDATE_LABEL_HA = "left"
+PLOT_KMEAN_CANDIDATE_LABEL_VA = "bottom"
+
+# Candidate marker style for Figure 02.
+PLOT_CANDIDATE_MARKER_MAJOR = "*"
+PLOT_CANDIDATE_MARKER_MINOR = "o"
+PLOT_CANDIDATE_COLOR_MAJOR = "red"
+PLOT_CANDIDATE_COLOR_MINOR = "deepskyblue"
+PLOT_CANDIDATE_EDGE_COLOR = "white"
+PLOT_CANDIDATE_EDGE_WIDTH = 0.6
+PLOT_USE_ORIGINAL_XY = True
+
+# Figure 00: mesh-style traffic-density map.
+# Output file:
+#   output/04_kmean_route_hit_density/figures/00_trafic_density.png
+MAKE_TRAFFIC_DENSITY_MESH_FIGURE = True
+TRAFFIC_DENSITY_MESH_ONLY_HIT_POSITIVE = False
+TRAFFIC_DENSITY_MESH_MAX_EDGE_M = 900.0
+TRAFFIC_DENSITY_MESH_SHADING = "gouraud"   # gouraud | flat
+TRAFFIC_DENSITY_MESH_CMAP = "inferno"
+PLOT_ROUTE_LINES_ON_TRAFFIC_MESH = True
+PLOT_TRAFFIC_MESH_NODE_DOTS = False
+TRAFFIC_MESH_NODE_DOT_SIZE = 2.0
+PLOT_TRAFFIC_MESH_EXCLUDED_NODES = False
+
+
+# Figure 04: mesh traffic density + no-fly overlay + TN candidates.
+# Symbols for candidates are kept the same as Figure 02.
+MAKE_TRAFFIC_DENSITY_CANDIDATES_FIGURE = True
+TRAFFIC_DENSITY_CANDIDATES_CMAP = "inferno"
+TRAFFIC_DENSITY_CANDIDATES_SHADING = "gouraud"
+TRAFFIC_DENSITY_CANDIDATES_MAX_EDGE_M = 900.0
+TRAFFIC_DENSITY_CANDIDATES_ONLY_HIT_POSITIVE = False
+
+# Optional route lines on Figure 04. Default False because the user requested
+# a cleaner mesh map without eye-damaging dot clutter.
+PLOT_ROUTE_LINES_ON_TRAFFIC_DENSITY_CANDIDATES = False
+
+# Overlay the no-fly zone on top of the mesh for checking.
+PLOT_NOFLY_OVERLAY_ON_TRAFFIC_DENSITY_CANDIDATES = True
+NOFLY_OVERLAY_MARKER = "s"
+NOFLY_OVERLAY_SIZE = 8.0
+NOFLY_OVERLAY_COLOR = "white"
+NOFLY_OVERLAY_ALPHA = 0.40

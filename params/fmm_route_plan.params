@@ -1,0 +1,58 @@
+# ======================================================================
+# FMM risk/conflict-aware route planning (10_fmm_route_plan.py)
+# ======================================================================
+# A NEW planning stage that plans one route per objective pair with the
+# Fast Marching Method (FMM) on a weighted cost field, instead of the fixed
+# Theta* corridors (steps 02/06/07 are left intact for comparison).
+#
+# Eikonal impedance per cell (all three terms min-max normalised to [0,1]
+# over the flyable area, so the weights are dimensionless and comparable):
+#
+#   cost = W_TIME     * 1                      (uniform -> path length / time)
+#        + W_RISK     * risk_norm  (step 01)   (obstacle + restricted-area risk)
+#        + W_CONFLICT * conflict_norm (step 08)(traffic density -> near-misses)
+#
+# FMM propagates the accumulated cost from each destination; routes are the
+# steepest-descent (cost-minimising) paths back from each origin. Raising
+# W_RISK bends routes away from risky ground; raising W_CONFLICT spreads them
+# off the busiest corridors; W_TIME keeps them short.
+# ----------------------------------------------------------------------
+
+# Input / output ------------------------------------------------------
+RISK_XYZ      = "output/01_random_node_map/random_2d_node_riskmap_seed2443556934.xyz"
+COST_MAP_FILE = "output/08_costmap/slowness_costmap.npz"
+CORRIDOR_DIR  = "output/07_corridor_network"
+OUT_DIR       = "output/10_fmm_routes"
+
+# Objective pairs to plan. "corridor" -> the same pairs step 07 solved
+# (pair_routes.csv); "all" -> every ordered objective pair.
+PAIR_SOURCE = "corridor"
+
+# Cost weights --------------------------------------------------------
+W_TIME     = 1.0     # travel time / path length
+W_RISK     = 2.0     # obstacle + RA risk exposure (step 01 risk_total)
+W_CONFLICT = 1.5     # traffic-density / conflict exposure (step 08)
+COST_FLOOR = 0.05    # min impedance on a free cell (FMM needs cost > 0)
+
+# Risk buffer ---------------------------------------------------------
+# step-01 risk_total is non-zero only on no-fly/RA cells, so on the flyable
+# area it is flat. Add a hazard-proximity risk = exp(-dist / RISK_BUFFER_M)
+# (1 at a no-fly boundary, decaying outward) so routes keep clearance.
+RISK_BUFFER_M = 300.0
+
+# No-fly handling -----------------------------------------------------
+# Step 01 marks no-fly cells as slowness >= NOFLY_SLOWNESS. When
+# NOFLY_AS_OBSTACLE is true they are impassable (infinite cost); otherwise
+# they are merely very expensive (NOFLY_PENALTY added to the impedance).
+NOFLY_AS_OBSTACLE = True
+NOFLY_SLOWNESS    = 10.0
+NOFLY_PENALTY     = 50.0
+
+# Conflict proxy ------------------------------------------------------
+# Step 08 slowness in [0,1] (1 = free, low = congested / outside corridor).
+# conflict = 1 - slowness, so congested + off-corridor cells cost more.
+CONFLICT_FROM_COSTMAP = True
+
+# Routes / output -----------------------------------------------------
+ROUTE_SMOOTH_WIN = 3     # moving-average window (cells) for plotted routes; 0/1 = raw
+MAKE_FIGURES     = True
