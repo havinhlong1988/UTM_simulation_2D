@@ -29,9 +29,10 @@ SHIFT_HOURS     = 1.0        # nominal target window (deadline search starts her
 ARRIVAL_WINDOW_H = 0.0       # demand injected over this span; 0 -> all ready at t=0
 BALANCE_ROUTES  = True       # cycle missions round-robin over ALL routes (use them
                              #   all at once) instead of random endpoints
-MAX_CONCURRENT  = 300        # meter airborne agents to this many. With the half-leg
-                             #   merge rule + reroute-on-stuck this drains fully; the
-                             #   merge rule (not the cap) sets the throughput.
+MAX_CONCURRENT  = 150        # meter airborne agents to this many (lower -> fewer
+                             #   simultaneous crossings/conflicts, longer makespan).
+LAUNCH_SPACING_S = 2.0       # min seconds between successive delivery launches, so
+                             #   departures are spread in time (fewer conflicts).
 ROUND_TRIP_PROB = 0.5        # P(non-contingency mission is a round trip)
 SIM_SEED        = 12345      # RNG seed for reproducible fleets
 
@@ -74,6 +75,9 @@ DK_PREFIX = "DK"
 
 # Flight dynamics -----------------------------------------------------
 SERVICE_TIME_S = 60.0         # dwell at the far end before a round-trip return
+# After arriving at the destination (round trips), the agent must idle at the
+# dock at least this long (charge / reload) before flying the return leg.
+MIN_DEST_IDLE_S = 300.0       # >= 5 minutes
 
 # Deconfliction -------------------------------------------------------
 # FLOW_MODE controls lane occupancy:
@@ -110,10 +114,24 @@ MERGE_FREE_FRAC = 0.5
 # OUTER corridors and the slowest to the shorter INNER ones.
 CAPTURE_COST_M = 3000.0       # cost a freshly-captured leg adds (metres-equiv)
 ZONE_BIAS_M    = 2000.0       # inner/outer steering strength by speed class
-# Optional junction (node) mutex on top of leg-block. OFF here so that one
-# location can launch multiple agents at once; turn ON to also forbid two
-# agents inside a junction zone simultaneously (raises closest-approach at
-# hubs but serialises departures).
+# HIGH penalty added to a leg while an occupant is HOLDING/WAITING on it, so the
+# router sends following agents around the jam instead of queueing behind it.
+HOLD_PENALTY_M = 20000.0
+# Flight-level (altitude) separation --------------------------------
+# Each leg gets a level from its travel HEADING (semicircular-rule style), so
+# crossing / opposing traffic is vertically separated. Two agents only CONFLICT
+# when horizontally close AND on the SAME level; the node mutex likewise only
+# serialises same-level agents. FLIGHT_LEVELS bands = 360/FLIGHT_LEVELS deg each.
+FLIGHT_LEVELS = 6             # number of altitude bands (>=2 splits opposing dirs;
+                              #   6 ~halves conflicts vs 4 at no throughput cost)
+LEVEL_SEP_M   = 30.0          # vertical spacing between bands (for reporting/3D)
+BASE_LEVEL_M  = 60.0          # altitude of the lowest band (m)
+
+# Junction (node) mutex, keyed by (node, LEVEL): forbids two SAME-LEVEL agents
+# inside a junction zone at once. WARNING: at these zone sizes it GRIDLOCKS this
+# network under 1000-agent load (circular waits at hubs -> only ~1% finish), so
+# it is left OFF -- flight levels + metering already cut conflicts ~78% without
+# any throughput loss. Enable only with much smaller zones / lighter load.
 NODE_MUTEX_ENABLE = False
 NODE_APPROACH_M      = 50.0   # node-mutex zone at traffic nodes (if enabled)
 OBJECTIVE_APPROACH_M = 120.0  # node-mutex zone at DB/DK hubs (if enabled)
@@ -127,10 +145,16 @@ STUCK_TIMEOUT_S    = 180.0    # if an agent is blocked this long at a node, it d
                               #   via an alternate corridor (breaks spillback deadlocks)
 
 # Outputs -------------------------------------------------------------
-SAMPLE_EVERY_S   = 60.0       # record a timeline/animation frame this often
+SAMPLE_EVERY_S   = 20.0       # record a timeline/animation frame this often (finer
+                              #   sampling + HTML lerp between frames -> smoother motion)
 MAX_GIF_FRAMES   = 360        # subsample frames down to at most this many
 GIF_FPS          = 20
 MAKE_HTML        = True        # self-contained interactive 2D agents_animation.html
+# Per-agent route replays under output/09_agent_sim_2d/agent_route/ (one HTML per
+# agent + index.html) to inspect each agent's travel. MAX = -1 -> all agents.
+MAKE_AGENT_ROUTE_HTML     = True
+AGENT_ROUTE_MAX           = -1
+AGENT_ROUTE_INCLUDE_PATROL = False
 MAKE_ANIMATION   = True        # matplotlib agents_animation.gif
 WRITE_TRAJECTORY = True        # downsampled trajectories.csv
 
