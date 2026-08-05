@@ -1,0 +1,684 @@
+# ======================================================================
+# PSO + ACO master-route planning parameters for LAE-UTM
+# ======================================================================
+# File purpose
+# ------------
+# This params file controls the master-route planning workflow:
+#
+#   1. Read TN/TA candidates from the 03 DBSCAN hit-count clustering output.
+#   2. Build a reduced graph using DB, DK, TN/TA, and FLZ nodes.
+#   3. Treat RA, obstacle, and no-fly nodes as blocked.
+#   4. Use PSO to tune early ACO parameters and edge-cost weights.
+#   5. Use ACO to generate DK <-> DB route scenarios.
+#   6. Add outer-zone backup routes for future open-wise operation.
+#   7. Maximize TA/TN route scenarios.
+#   8. Add one emergency FLZ branch for each successful route.
+#   9. Save CSV outputs and figures, including PSO/ACO snapshots and ACO progress bars.
+#
+# Important terminology
+# ---------------------
+# DB : Drone base / base station endpoint.
+# DK : Docking station endpoint.
+# FLZ: Emergency safe parking / emergency landing zone.
+# RA : Restricted airspace. RA is hard no-fly.
+# TN : Traffic node from 03's DBSCAN hit-count candidate extraction.
+# TA : Traffic anchor. In this script, TA is mapped to TN_major/TN_minor.
+#
+# Copy this file to:
+#
+#   params/routeplan_PSO_ACO.params
+#
+# then run:
+#
+#   python 05_run_master_plan.py params/routeplan_PSO_ACO.params
+# ======================================================================
+
+
+# ----------------------------------------------------------------------
+# Version tag
+# ----------------------------------------------------------------------
+# This tag is only for bookkeeping. It is printed/saved with outputs so you
+# can remember which parameter version created a result.
+PARAM_SET_TAG = "v8_aco_progress_bars"
+
+
+# ----------------------------------------------------------------------
+# Run mode
+# ----------------------------------------------------------------------
+# RUN_MODE controls whether the script recomputes the full optimization or
+# only redraws figures from existing CSV outputs.
+#
+# Options:
+#   "all"       : run the full flow: load model -> build graph -> PSO -> ACO
+#                 -> save CSV -> plot figures.
+#   "plot_only" : do not run PSO/ACO again. Re-read existing output CSV files
+#                 and regenerate figures only.
+#
+# Use "plot_only" when you already have outputs and only changed plot labels,
+# selected pair, DPI, or snapshot settings.
+RUN_MODE = "all"   # all | plot_only
+
+
+# ----------------------------------------------------------------------
+# Input / output paths
+# ----------------------------------------------------------------------
+# INPUT_NODE_FILE is produced by 03_cluster_theta_routes.py (the DBSCAN
+# hit-count clustering stage). It contains every raw model node -- not just
+# candidates -- plus objective (DB/DK/FLZ/RA) and TN candidate flags.
+# build_master_edges() needs the full node set to build its no-fly clearance
+# KD-tree; a candidates-only file would break that check.
+# Expected file from the previous step:
+#
+#   output/thetastar_master_plan/clustering_hitcount/master_plan_input_nodes.csv
+#
+# (04_kmean_route_hit_density.py's all_model_nodes_objective_TNcandidates.csv
+# is an older, independent TN-detection path and is no longer used here.)
+INPUT_NODE_FILE = "output/thetastar_master_plan/clustering_hitcount/master_plan_input_nodes.csv"
+
+# OUTPUT_DIR stores all master-route planning outputs:
+#
+#   master_graph_nodes.csv
+#   master_graph_edges.csv
+#   master_routes.csv
+#   master_route_edges.csv
+#   pso_history.csv
+#   pso_best_aco_params.csv
+#   aco_history/*.csv
+#   figures/*.png
+#
+OUTPUT_DIR = "output/router_master_plan"
+
+
+# ----------------------------------------------------------------------
+# Coordinate mode
+# ----------------------------------------------------------------------
+# XY_MODE controls how coordinates are interpreted.
+#
+# Options:
+#   "auto"   : automatically decide whether x/y are lon/lat or meters.
+#   "lonlat" : force geographic longitude/latitude input.
+#   "meter"  : force local/projected meter coordinates.
+#
+# Use "auto" unless you know the file is wrongfully detected.
+XY_MODE = "auto"
+
+
+# ----------------------------------------------------------------------
+# Objective / label prefixes
+# ----------------------------------------------------------------------
+# The script identifies graph-node roles from label prefixes.
+# If your labels are BD01 instead of DB01, add "BD" to DB_PREFIXES.
+# Example:
+#   DB_PREFIXES = ["DB", "BD"]
+#
+DB_PREFIXES = ["DB"]
+DK_PREFIXES = ["DK"]
+FLZ_PREFIXES = ["FLZ"]
+RA_PREFIXES = ["RA"]
+
+
+# ----------------------------------------------------------------------
+# TN / TA route requirement
+# ----------------------------------------------------------------------
+# REQUIRE_TN_IN_ROUTE requires each normal route to include at least some
+# traffic nodes. This prevents the route planner from choosing only direct
+# DB-DK paths and ignoring the master traffic-node network.
+#
+# MIN_TN_PER_ROUTE is the minimum number of TN/TA nodes required inside a
+# normal route. A value of 1 means each route should pass at least one TN/TA.
+#
+REQUIRE_TN_IN_ROUTE = True
+MIN_TN_PER_ROUTE = 1
+
+
+# ----------------------------------------------------------------------
+# FLZ emergency support settings
+# ----------------------------------------------------------------------
+# FLZ is used as emergency safe parking / emergency landing support.
+#
+# INCLUDE_FLZ_AS_GRAPH_NODE:
+#   True  : FLZ nodes are inserted into the reduced master graph.
+#   False : FLZ nodes are only used as reference points, not graph nodes.
+#
+# ALLOW_FLZ_NORMAL_GRAPH_EDGES:
+#   True  : normal graph can include FLZ edges, but route cost can penalize
+#           FLZ so normal routes do not unnecessarily pass through FLZ.
+#   False : FLZ is kept out of normal graph edges.
+#
+# FLZ_SUPPORT_SIGMA_M:
+#   Gaussian distance scale for emergency support. Larger values make FLZ
+#   influence a wider area.
+#
+INCLUDE_FLZ_AS_GRAPH_NODE = True
+ALLOW_FLZ_NORMAL_GRAPH_EDGES = True
+FLZ_SUPPORT_SIGMA_M = 800.0
+
+
+# ----------------------------------------------------------------------
+# HARD route requirements (forward/backward/outer_backup only)
+# ----------------------------------------------------------------------
+# These HARDEN the soft mechanisms above into real reject-and-reroute rules,
+# mirroring 02_run_theta_plan.py's FLZ_BUFFER_ENABLE hard requirement.
+# Unlike REQUIRE_TN_IN_ROUTE (a soft ACO cost penalty that a route can still
+# ignore if the penalty is outweighed), these are checked AFTER ACO returns
+# a route and, if violated, force a reroute through the nearest compliant
+# node via plan_route_via_waypoints(). Scope: forward, backward, and
+# outer_backup route layers only -- NOT ta_coverage (already forced through
+# a TN by construction) and NOT flz_branch (an emergency spur TO an FLZ;
+# checking FLZ-buffer-compliance on it is meaningless).
+#
+# If forcing still cannot produce a compliant route within the retry
+# budget, the ORIGINAL best-effort route is kept (never dropped) and the
+# failure is reported honestly via new master_routes.csv columns
+# (flz_buffer_ok/flz_buffer_forced/flz_buffer_via, tn_hard_ok/tn_hard_forced/
+# tn_hard_via, hard_requirement_message) and a console summary line.
+
+# REQUIRE_TN_IN_ROUTE_HARD: hardens REQUIRE_TN_IN_ROUTE / MIN_TN_PER_ROUTE
+# above from a soft ACO cost penalty into a genuine hard rule. Reuses the
+# SAME MIN_TN_PER_ROUTE threshold -- no separate count knob.
+REQUIRE_TN_IN_ROUTE_HARD = True
+
+# MASTER_FLZ_BUFFER_ENABLE / MASTER_FLZ_BUFFER_RADIUS_M: every forward/
+# backward/outer_backup route must pass within this radius of at least one
+# FLZ node, checked against the route's per-edge nearest_flz_distance_m
+# (already computed in build_master_edges()). Named MASTER_-prefixed (not
+# FLZ_BUFFER_*) to avoid confusion with 02's raw-grid segment-wise check --
+# this one is edge-sampled at EDGE_SAMPLE_STEP_M resolution, a master-graph-
+# scale approximation, not a full route-polyline recompute. 250m sits well
+# under FLZ_SUPPORT_SIGMA_M=800 (the soft emergency-support falloff above)
+# while still being a meaningful "actually near an FLZ" guarantee, given
+# master-graph edges can span up to MAX_MASTER_EDGE_DISTANCE_M.
+MASTER_FLZ_BUFFER_ENABLE = True
+MASTER_FLZ_BUFFER_RADIUS_M = 250.0
+
+# MASTER_HARD_REQUIREMENT_MAX_TRIES: bounded retry count for forcing via the
+# nearest TN or FLZ candidate (least-detour-first), when only ONE of the two
+# requirements is missing. Mirrors FLZ_BRANCH_MAX_ATTACH_TRIES=12 below.
+MASTER_HARD_REQUIREMENT_MAX_TRIES = 12
+
+# MASTER_HARD_REQUIREMENT_MAX_TRIES_BOTH_MISSING: tighter cap on the nested
+# TN x FLZ candidate search used only when BOTH requirements are missing
+# simultaneously (expected to be rare -- PSO/ACO cost already biases toward
+# TN and away from FLZ via tn_bonus/flz_penalty below). Keeps worst-case ACO
+# re-solves bounded (tries_both^2 leg-pairs instead of tries^2).
+MASTER_HARD_REQUIREMENT_MAX_TRIES_BOTH_MISSING = 4
+
+
+# ----------------------------------------------------------------------
+# Route pair selection
+# ----------------------------------------------------------------------
+# ROUTE_PAIR_MODE controls which DK-DB endpoint pairs are planned.
+#
+# Options:
+#   "all_dk_to_all_db"  : every DK connects to every DB.
+#   "nearest_db_per_dk" : each DK connects only to its nearest DB.
+#
+# MAX_ROUTE_PAIRS limits the number of pairs for testing.
+#   0 = no limit.
+#
+ROUTE_PAIR_MODE = "all_dk_to_all_db"
+MAX_ROUTE_PAIRS = 0
+
+
+# ----------------------------------------------------------------------
+# Outer-zone backup route for future open-wise operation
+# ----------------------------------------------------------------------
+# The outer-zone backup route is the "backup of backup" corridor.
+# It is useful when inner corridors are busy during swarm operation.
+#
+# Normal route:
+#   DK -> inner TN/TA -> DB
+#
+# Outer backup route:
+#   DK -> TN/TA near AOI boundary -> DB
+#
+ENABLE_OUTER_ZONE_BACKUP_ROUTE = True
+
+# AOI_POLYGON defines the study area boundary only when you want to force
+# a real study-area polygon.
+#
+# For random/simulated models, keep AOI_POLYGON = None.
+# Then the outer-zone backup route is derived automatically from the model
+# bounding box / simulated map extent, not from the Hoa Lac polygon.
+#
+# For real Hoa Lac only, you can set AOI_POLYGON = [(lon, lat), ...]
+# and use OUTER_ZONE_METHOD = "aoi_boundary".
+AOI_POLYGON = None
+
+# OUTER_ZONE_METHOD controls how outer-zone TN/TA nodes are identified.
+#
+# Options:
+#   "aoi_boundary"      : nodes within OUTER_ZONE_BAND_M of AOI boundary.
+#   "bbox_boundary"     : nodes near the bounding box edge of the model.
+#   "radial_percentile" : farthest nodes from the map center.
+#   "hybrid"            : boundary band OR radial percentile.
+#
+OUTER_ZONE_METHOD = "bbox_boundary"
+
+# Width of the AOI boundary band in meters. TN/TA nodes within this distance
+# from the AOI polygon boundary are considered outer-zone nodes.
+OUTER_ZONE_BAND_M = 700.0
+
+# Used by radial_percentile or hybrid mode. 85 means the farthest 15 percent
+# from the map center can be considered outer-zone nodes.
+OUTER_ZONE_RADIAL_PERCENTILE = 85.0
+
+# Minimum number of outer-zone nodes. If too few are found by the selected
+# method, the script can include additional far/boundary candidates.
+OUTER_ZONE_MIN_CANDIDATE_NODES = 3
+
+# Node roles allowed to be selected as outer-zone route waypoints.
+OUTER_ZONE_NODE_ROLES = ["TN_major", "TN_minor"]
+
+# How to mark an edge as an outer-zone edge.
+#
+# Options:
+#   "any_outer_endpoint"  : edge is outer-zone if either endpoint is outer.
+#   "both_outer_endpoints" : edge is outer-zone only if both endpoints are outer.
+#
+OUTER_ZONE_EDGE_MODE = "any_outer_endpoint"
+
+# Penalty applied to normal inner routes if they use outer-zone edges.
+# Keep 0.0 if you do not want this to affect normal routes.
+OUTER_ZONE_NORMAL_EDGE_PENALTY = 0.0
+
+# If True, outer backup routes avoid edges already used by normal inner routes.
+OUTER_ZONE_AVOID_INNER_ROUTES = True
+
+# Bonus for outer-zone edges. Larger value makes outer backup more strongly
+# prefer boundary/outer-zone edges.
+OUTER_ZONE_EDGE_BONUS_FACTOR = 0.65
+
+# Penalty for non-outer edges during outer backup route planning.
+OUTER_ZONE_NON_OUTER_EDGE_PENALTY = 2.0
+
+# Penalty for reusing inner route edges during outer backup route planning.
+OUTER_ZONE_AVOID_INNER_EDGE_PENALTY = 5.0
+
+# Minimum number of TN/TA waypoints required in the outer backup route.
+OUTER_ZONE_MIN_TN_WAYPOINTS = 1
+
+# Number of candidate outer-zone waypoints tested. Larger values improve
+# chance of finding a good route but increase runtime.
+OUTER_ZONE_WAYPOINT_TOP_N = 30
+
+# If True, FLZ can be used as an outer backup waypoint. Usually keep False
+# because FLZ should mainly be for emergency branches.
+OUTER_ZONE_ALLOW_FLZ_WAYPOINTS = False
+
+# ACO settings specifically for outer-zone backup route.
+OUTER_ZONE_ACO_ANTS = 70
+OUTER_ZONE_ACO_ITERATIONS = 100
+OUTER_ZONE_ACO_MAX_STEPS = 160
+
+
+# ----------------------------------------------------------------------
+# No-fly / obstacle / RA hard rules
+# ----------------------------------------------------------------------
+# Slowness threshold for hard no-fly cells.
+# Your current LAE-UTM convention:
+#   slowness >= 10.0 s/m => no-fly / blocked.
+#   slowness <  10.0 s/m => flyable.
+#
+NOFLY_SLOWNESS_THRESHOLD = 10.0
+NOFLY_THRESHOLD_MODE = "greater_equal"   # greater_equal | greater | equal
+
+# Candidate master edges are rejected if their straight segment passes too
+# close to no-fly / obstacle / RA nodes.
+# Larger EDGE_NOFLY_CLEARANCE_M gives safer but fewer graph edges.
+EDGE_NOFLY_CLEARANCE_M = 80.0
+
+# Segment sampling interval used to check edge collision/clearance.
+# Smaller value = more accurate but slower.
+EDGE_SAMPLE_STEP_M = 50.0
+
+# Maximum allowed reduced-graph edge distance.
+# Larger value gives more graph connectivity but can create unrealistic long
+# jumps across the map.
+MAX_MASTER_EDGE_DISTANCE_M = 2500.0
+
+# If False, direct DB-DK edges are blocked so routes must connect through TN/TA.
+ALLOW_DIRECT_DB_DK_EDGE = False
+
+# Clearance normalization used in edge-cost calculation.
+# Larger value makes the clearance term vary more gently.
+CLEARANCE_NORMALIZATION_M = 600.0
+
+# Small positive value to avoid divide-by-zero in edge-cost calculations.
+EDGE_COST_EPSILON = 0.05
+
+
+# ----------------------------------------------------------------------
+# PSO settings
+# ----------------------------------------------------------------------
+# PSO is used before ACO to tune good ACO parameters and edge-cost weights.
+# It does not directly create the final route.
+#
+# Runtime approximately increases with:
+#
+#   PSO_PARTICLES * PSO_ITERATIONS * ACO_EVALUATION_COST
+#
+# Good quick test:
+#   PSO_PARTICLES = 16
+#   PSO_ITERATIONS = 20
+#
+# Good final route planning:
+#   PSO_PARTICLES = 40
+#   PSO_ITERATIONS = 60
+#
+PSO_PARTICLES = 50
+PSO_ITERATIONS = 15
+
+# PSO_INERTIA controls how strongly particles continue in their current
+# direction. Higher = more exploration; lower = more stable convergence.
+PSO_INERTIA = 0.90
+
+# PSO_COGNITIVE controls how much each particle follows its own best history.
+PSO_COGNITIVE = 1.40
+
+# PSO_SOCIAL controls how much each particle follows the global swarm best.
+PSO_SOCIAL = 1.60
+
+# Random seed. Keep fixed for repeatable results. Change to test another run.
+PSO_RANDOM_STATE = 42
+
+# Print PSO iteration progress to terminal.
+PSO_VERBOSE = True
+
+# Number of DK-DB route pairs used during PSO evaluation.
+# This can reduce runtime. 0 means evaluate all pairs if supported by script.
+PSO_EVALUATION_MAX_PAIRS = 0
+
+# Penalty when a candidate PSO solution creates routes without enough TN/TA.
+# Increase if routes ignore TN/TA candidates.
+PSO_MISSING_TN_PENALTY = 1000.0
+
+# PSO_BOUNDS defines what variables PSO is allowed to tune.
+# The first four are ACO parameters. The rest are edge-cost weights.
+PSO_BOUNDS = {
+    # ACO alpha controls pheromone influence.
+    # Higher alpha makes ants follow previously good routes more strongly.
+    # Too high can make all routes collapse into one corridor.
+    "aco_alpha": (0.6, 1.8),
+
+    # ACO beta controls heuristic influence.
+    # Higher beta makes ants follow local edge quality more strongly.
+    "aco_beta": (2.0, 6.0),
+
+    # Evaporation controls how quickly old pheromone disappears.
+    # Higher evaporation keeps exploration active.
+    "aco_evaporation": (0.20, 0.60),
+
+    # Pheromone Q controls how much pheromone good routes deposit.
+    # Too high can over-converge to one corridor.
+    "aco_pheromone_q": (0.5, 3.0),
+
+    # Distance weight: high value prefers shorter routes.
+    # Keep moderate because we also want TA coverage and route diversity.
+    "distance_weight": (0.25, 1.5),
+
+    # Density weight: prefers high route-hit-density / traffic-density nodes.
+    # Useful, but do not make it too dominant if you want all TA scenarios.
+    "density_weight": (0.5, 2.0),
+
+    # Clearance weight: prefers edges farther from RA/no-fly/obstacles.
+    # Important for safe traffic-node placement and corridor safety.
+    "clearance_weight": (1.0, 3.5),
+
+    # Emergency weight: prefers routes with better access to FLZ support.
+    "emergency_weight": (0.5, 2.5),
+
+    # TN bonus: rewards edges/nodes that use TN/TA candidates.
+    # Increase if routes do not use enough TN/TA.
+    "tn_bonus": (1.0, 4.0),
+
+    # FLZ penalty: discourages FLZ inside normal routes.
+    # FLZ should mainly be used as emergency branches, not normal corridor.
+    "flz_penalty": (1.0, 4.0),
+}
+
+
+# ----------------------------------------------------------------------
+# Main ACO settings
+# ----------------------------------------------------------------------
+# ACO is the actual route construction algorithm.
+# PSO can override alpha/beta/evaporation/pheromone_q after optimization.
+# These fallback values are used if PSO variables are missing.
+ACO_ALPHA = 1.2
+ACO_BETA = 3.0
+ACO_EVAPORATION = 0.25
+ACO_PHEROMONE_Q = 1.0
+
+# Number of ants used for normal forward/backward DK-DB routes.
+# More ants = better exploration but slower runtime.
+ACO_ANTS = 250
+
+# Number of ACO update iterations for normal routes.
+ACO_ITERATIONS = 30
+
+# Maximum number of graph transitions one ant can make before failing.
+# This is not distance in meters. It is graph-node movement count.
+# Increase if routes fail because ants cannot reach the target.
+ACO_MAX_STEPS = 7000
+
+# ACO random seed.
+ACO_RANDOM_STATE = 42
+
+# Print ACO progress for each route.
+ACO_VERBOSE = False
+
+# ----------------------------------------------------------------------
+# ACO progress display (v8)
+# ----------------------------------------------------------------------
+# This controls the progress display during the long section:
+#
+#   [routerplan] Running ACO for forward/backward, outer backup,
+#   TA coverage, and FLZ branch routes...
+#
+# It does not change the route result. It only shows progress in terminal.
+ACO_PROGRESS_BAR = True
+
+# Options:
+#   "auto" : use tqdm if installed; otherwise use simple text percentage.
+#   "tqdm" : prefer tqdm progress bars; fallback to text if tqdm is missing.
+#   "text" : always use simple terminal percentage messages.
+ACO_PROGRESS_BACKEND = "auto"
+
+# Only used by the text backend.
+#   1  = print after every finished ACO route task.
+#   5  = print every 5 finished tasks.
+#   10 = less terminal output.
+ACO_PROGRESS_TEXT_EVERY_N = 1
+
+# Initial pheromone scaling. Larger value makes the first ACO search more
+# biased by the PSO-weighted edge desirability.
+ACO_INITIAL_PHEROMONE_SCALE = 1.0
+
+# Penalty inside ACO if a route does not meet MIN_TN_PER_ROUTE.
+ACO_MISSING_TN_PENALTY = 5000.0
+
+# Backward route can avoid forward route edges to create separate lanes.
+ACO_BACKWARD_AVOID_FORWARD_EDGES = True
+
+# Penalty when backward route reuses forward route edges.
+BACKWARD_AVOID_FORWARD_EDGE_PENALTY = 2.5
+
+
+# ----------------------------------------------------------------------
+# TA/TN maximum scenario coverage
+# ----------------------------------------------------------------------
+# This section creates additional route scenarios to maximize use of all
+# traffic anchors / traffic nodes.
+#
+# In this script:
+#   TA = TN_major + TN_minor
+#
+# Route scenario example:
+#   DK04 -> TN024 -> DB01
+#
+ENABLE_TA_COVERAGE_SCENARIOS = True
+TA_NODE_ROLES = ["TN_major", "TN_minor"]
+
+# Maximum number of TA/TN candidates to use.
+#   0 = try every TA/TN candidate.
+# ----------------------------------------------------------------------
+# This section creates additional route scenarios to maximize use of all
+# traffic anchors / traffic nodes.
+#
+# In this script:
+#   TA = TN_major + TN_minor
+#
+# Route scenario example:
+# Use a positive value for quick tests.
+MAX_TA_COVERAGE_SCENARIOS = 0
+
+# If True, each TA route tries to avoid already-used route corridors.
+TA_COVERAGE_AVOID_USED_ROUTES = True
+
+# ACO settings for TA/TN coverage routes.
+TA_COVERAGE_ACO_ANTS = 100
+TA_COVERAGE_ACO_ITERATIONS = 120
+TA_COVERAGE_ACO_MAX_STEPS = 140
+
+
+# ----------------------------------------------------------------------
+# Swarm separation / crossing reduction
+# ----------------------------------------------------------------------
+# These settings reduce collision risk when many UAVs operate in swarm-like
+# conditions. The planner penalizes reuse of previously used route edges/nodes.
+# It does not absolutely forbid reuse, because sometimes the graph has no
+# possible alternative.
+#
+SWARM_SEPARATE_ALL_ROUTES = True
+SWARM_AVOID_USED_ROUTE_NODES = True
+
+
+# ----------------------------------------------------------------------
+# Emergency FLZ branch per route
+# ----------------------------------------------------------------------
+# Add one emergency branch from each successful operational route to the
+# nearest reachable FLZ. This creates a safe parking option if a UAV has an
+# issue during operation.
+#
+ENABLE_FLZ_BRANCH_PER_ROUTE = True
+
+# Number of candidate attachment points along the route to try when building
+# the FLZ branch. Larger values improve success chance but increase runtime.
+FLZ_BRANCH_MAX_ATTACH_TRIES = 12
+
+# Maximum allowed distance from route branch point to FLZ.
+FLZ_BRANCH_MAX_DISTANCE_M = 2500.0
+
+# If True, FLZ branches also avoid already-used routes. Usually keep False
+# because emergency access should prioritize reachability.
+FLZ_BRANCH_AVOID_USED_ROUTES = False
+
+# ACO settings for FLZ branch routes.
+FLZ_BRANCH_ACO_ANTS = 60
+FLZ_BRANCH_ACO_ITERATIONS = 80
+FLZ_BRANCH_ACO_MAX_STEPS = 80
+
+
+# ----------------------------------------------------------------------
+# Figure output settings
+# ----------------------------------------------------------------------
+# Main figures are saved under:
+#
+#   output/router_master_plan/figures/
+#
+MAKE_FIGURES = True
+FIGURE_DPI = 220
+
+# If True, plot reduced graph edges in the background. This can make the map
+# busy, so False is usually cleaner.
+PLOT_MASTER_GRAPH_EDGES = False
+PLOT_MAX_GRAPH_EDGES = 1000
+
+# Plot labels for DB/DK/FLZ/TN nodes on the main figure.
+PLOT_NODE_LABELS = True
+
+# Cleaner single-plan figure label switch.
+PLOT_NODE_LABELS_SINGLE_PLAN = False
+
+
+# ----------------------------------------------------------------------
+# PSO snapshot plotting
+# ----------------------------------------------------------------------
+# PSO snapshots are saved to:
+#
+#   output/router_master_plan/figures/PSO_snap/
+#
+# They show how best fitness changes through PSO iterations.
+#
+PLOT_PSO_SNAPSHOTS = True
+
+# Save one PSO snapshot every N iterations.
+#   1 = save every iteration.
+#   5 = save every 5 iterations.
+PSO_SNAPSHOT_EVERY_N_ITER = 1
+
+
+# ----------------------------------------------------------------------
+# ACO snapshot plotting
+# ----------------------------------------------------------------------
+# ACO snapshots are saved to:
+#
+#   output/router_master_plan/figures/ACO_snap/
+#
+# They show the current-best ACO path at selected iterations.
+#
+PLOT_ACO_SNAPSHOTS = True
+
+# Save one ACO snapshot every N iterations.
+#   1 = save every iteration, many files.
+#   5 = balanced.
+#   10 = fewer files.
+ACO_SNAPSHOT_EVERY_N_ITER = 5
+
+
+# ----------------------------------------------------------------------
+# All-pair corridor plotting
+# ----------------------------------------------------------------------
+# Corridor figures are saved to:
+#
+#   output/router_master_plan/figures/corridors/
+#
+# v8 behavior:
+#   - CORRIDOR_PAIR_MODE = "all" makes one figure per DK-DB pair.
+#   - Each figure contains all routes belonging to that pair:
+#       forward, backward, outer_backup, ta_coverage, and flz_branch.
+#   - This is the recommended mode for checking the full master plan.
+#
+# Example output filename:
+#
+#   DK04_to_DB01_all_routes.png
+#
+PLOT_PAIR_CORRIDORS = True
+
+# all    : plot every DK-DB pair; one combined figure per pair.
+# single : plot only SINGLE_PAIR_DK_LABEL <-> SINGLE_PAIR_DB_LABEL.
+#          Use this only for debugging one pair.
+CORRIDOR_PAIR_MODE = "all"
+
+# Limit number of pair figures. 0 = no limit.
+MAX_PAIR_CORRIDOR_FIGURES = 0
+
+# False: only save the combined all-routes figure for each pair.
+# True : also save one separate figure for each route_key inside each pair.
+PLOT_EACH_ROUTE_IN_PAIR_CORRIDORS = False
+
+# Label DB/DK/FLZ/TN node names in pair corridor figures.
+# Usually False because many labels can clutter the map.
+PLOT_PAIR_CORRIDOR_NODE_LABELS = False
+
+# Show no-fly / RA / obstacle nodes in the pair figures.
+PLOT_NOFLY_IN_PAIR_CORRIDORS = True
+
+# Show flyable raw node cloud in the pair figures.
+# Usually False to keep corridor figures clean.
+PLOT_FLYABLE_IN_PAIR_CORRIDORS = False
+
+# These two labels are used only when CORRIDOR_PAIR_MODE = "single".
+# They are ignored when CORRIDOR_PAIR_MODE = "all".
+SINGLE_PAIR_DB_LABEL = "DB01"
+SINGLE_PAIR_DK_LABEL = "DK04"

@@ -1,0 +1,24 @@
+{
+  "version": "v1",
+  "weights": {
+    "time": 1.0,
+    "risk": 2.0,
+    "conflict": 1.5
+  },
+  "grid": {
+    "nx": 101,
+    "ny": 101,
+    "dx_m": 50.0,
+    "map_w_m": 5050.0,
+    "map_h_m": 5050.0
+  },
+  "n_nofly_cells": 2792,
+  "n_pairs": 28,
+  "n_routes": 28,
+  "pair_source": "corridor",
+  "nofly_as_obstacle": true,
+  "mean_route_length_m": 3304.0,
+  "mean_corridor_length_m": 2945.3,
+  "mean_risk_exposure": 0.5211,
+  "mean_conflict_exposure": 0.2691
+}

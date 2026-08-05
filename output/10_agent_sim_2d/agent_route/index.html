@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html lang="en"><head><meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Agent routes</title>
+<style>
+  body{margin:0;background:#0f1420;color:#e8edf5;font-family:system-ui,-apple-system,Segoe UI,Roboto,sans-serif;padding:16px;}
+  h1{font-size:18px;} .sub{color:#9fb0c8;font-size:13px;margin-bottom:12px;}
+  input{padding:7px 10px;border-radius:7px;border:1px solid #33405a;background:#1a2233;color:#e8edf5;width:220px;margin-bottom:12px;}
+  table{border-collapse:collapse;width:100%;font-size:13px;font-variant-numeric:tabular-nums;}
+  th,td{text-align:left;padding:6px 10px;border-bottom:1px solid #222c40;}
+  th{color:#9fb0c8;position:sticky;top:0;background:#0f1420;cursor:pointer;}
+  a{color:#6ab0ff;text-decoration:none;} tr:hover td{background:#161d2c;}
+</style></head><body>
+<h1>Per-agent route replays</h1>
+<div class="sub">8 agents &mdash; click one to replay its travel. <a href="../agents_animation.html">&larr; full simulation</a></div>
+<input id="q" placeholder="filter (agent id, DB/DK, type)..." oninput="filter()">
+<table id="t"><thead><tr>
+  <th>agent</th><th>type</th><th>route</th><th>km/h</th><th>flight (min)</th><th>route (m)</th><th>holds</th><th>done</th>
+</tr></thead><tbody><tr><td><a href='agent_0.html'>agent 0</a></td><td>round_trip</td><td>DB01&rarr;DK01</td><td>30</td><td>36.1</td><td>5282</td><td>6</td><td>yes</td></tr><tr><td><a href='agent_1.html'>agent 1</a></td><td>round_trip</td><td>DK01&rarr;DB01</td><td>50</td><td>26.9</td><td>5299</td><td>6</td><td>yes</td></tr><tr><td><a href='agent_2.html'>agent 2</a></td><td>one_way</td><td>DB01&rarr;DK02</td><td>60</td><td>11.7</td><td>3440</td><td>5</td><td>yes</td></tr><tr><td><a href='agent_3.html'>agent 3</a></td><td>backup</td><td>DK02&rarr;DB01</td><td>30</td><td>33.2</td><td>3683</td><td>5</td><td>yes</td></tr><tr><td><a href='agent_4.html'>agent 4</a></td><td>round_trip</td><td>DB01&rarr;DK03</td><td>60</td><td>38.2</td><td>10413</td><td>13</td><td>yes</td></tr><tr><td><a href='agent_5.html'>agent 5</a></td><td>round_trip</td><td>DK03&rarr;DB01</td><td>50</td><td>28.4</td><td>7925</td><td>12</td><td>yes</td></tr><tr><td><a href='agent_6.html'>agent 6</a></td><td>one_way</td><td>DB01&rarr;DK04</td><td>60</td><td>9.1</td><td>1684</td><td>3</td><td>yes</td></tr><tr><td><a href='agent_7.html'>agent 7</a></td><td>one_way</td><td>DK04&rarr;DB01</td><td>50</td><td>15.5</td><td>1687</td><td>3</td><td>yes</td></tr></tbody></table>
+<script>
+function filter(){ const q=document.getElementById('q').value.toLowerCase();
+  for(const tr of document.querySelectorAll('#t tbody tr'))
+    tr.style.display = tr.textContent.toLowerCase().includes(q)?'':'none'; }
+</script></body></html>
