@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-09_simulate_agents_2d.py
+10_simulate_agents_2d.py
 
 Multi-agent 2D corridor traffic simulation on the shared UAV network
 built by 07_build_corridor_network.py.
@@ -35,13 +35,13 @@ by every output.
 
 Run
 ---
-    python 09_simulate_agents_2d.py
-    python 09_simulate_agents_2d.py --param-file params/simulate_agents_2d.params
-    python 09_simulate_agents_2d.py --agents 60 --hours 4 --seed 7 --no-animation
+    python 10_simulate_agents_2d.py
+    python 10_simulate_agents_2d.py --param-file params/simulate_agents_2d.params
+    python 10_simulate_agents_2d.py --agents 60 --hours 4 --seed 7 --no-animation
 
 Explicit CLI flags override the params file.
 
-Outputs (output/09_agent_sim_2d/)
+Outputs (output/10_agent_sim_2d/)
 ---------------------------------
     agent_missions.csv    one row per mission (endpoints, timings, holds)
     sim_timeline.csv      per-sample airborne / holding counts, min sep
@@ -173,7 +173,7 @@ def interp_xy(xy: np.ndarray, cs: np.ndarray, s: float) -> np.ndarray:
 
 
 def load_costmap(path):
-    """Load the slowness cost-map produced by 08_generate_costmap.py.
+    """Load the slowness cost-map produced by 09_generate_costmap.py.
     Returns (grid[ny,nx], x0, y0, res, nx, ny) or None if absent."""
     p = THIS_DIR / str(path)
     if not p.exists():
@@ -328,7 +328,7 @@ class Agent:
                  "dist_m", "air_s", "hold_s", "n_holds", "holding", "was_holding",
                  "launch_t", "complete_t", "route_len", "held_node",
                  "speed", "speed_kmh", "is_patrol", "laps", "stuck_s", "n_reroutes",
-                 "cont_frac", "battery_wh", "charge_s", "n_charges")
+                 "cont_frac", "battery_wh", "charge_s", "n_charges", "is_priority")
 
     def __init__(self, aid, origin, dest, round_trip, priority,
                  segs, kinds, dwell_dur, outbound_upto, route_len,
@@ -344,6 +344,7 @@ class Agent:
         self.speed = speed_mps          # cruise speed (m/s), by UAV class
         self.speed_kmh = speed_kmh
         self.is_patrol = is_patrol      # continuous city-monitoring loop agent
+        self.is_priority = False        # route-aware priority mission (fast + spine access)
         self.laps = 0                   # completed patrol laps
         self.stuck_s = 0.0              # continuous time blocked (for reroute)
         self.n_reroutes = 0             # diversions taken around congestion
@@ -445,6 +446,20 @@ def build_fleet(net: Network, params, rng: np.random.Generator):
     balance = bool(pget(params, "BALANCE_ROUTES", True))
     kmh, weights = _speed_classes(params)
 
+    # ---- route-aware priority ------------------------------------------
+    # Missions whose ORIGIN or DEST is one of these objective labels are
+    # prioritised: forced to PRIORITY_SPEED_KMH (fastest class by default),
+    # exempt from the inner/outer zone bias so they may use the congested
+    # inner spine directly (see zone_cost), and given launch/merge precedence
+    # via a priority bonus. Empty list -> feature OFF (uniform behaviour).
+    prio_labels = set(pget(params, "PRIORITY_ORIGIN_LABELS", []) or [])
+    prio_speed_kmh = float(pget(params, "PRIORITY_SPEED_KMH", max(kmh)))
+    # NOTE: separation is a TIME headway, so faster agents need MORE lane spacing
+    # (~500 m at 60 vs ~250 m at 30 km/h) -- forcing priority traffic fast can
+    # REDUCE capacity on the very spine we want to clear. Gate speed-forcing so the
+    # queue-precedence + direct-spine-access levers can be used without it.
+    prio_force_speed = bool(pget(params, "PRIORITY_FORCE_SPEED", True))
+
     dbs = net.objectives(db_pref)
     dks = net.objectives(dk_pref)
     if not dbs or not dks:
@@ -484,8 +499,15 @@ def build_fleet(net: Network, params, rng: np.random.Generator):
             contingency = "backup" if rng.random() < backup_frac else "return"
             round_trip = False
         sp_mps, sp_kmh = pick_speed()
+        # priority missions (touching a PRIORITY_ORIGIN_LABELS hub) are forced
+        # to the priority speed class so they clear the shared spine faster
+        is_prio = bool(prio_labels) and (origin in prio_labels or dest in prio_labels)
+        if is_prio and prio_force_speed:
+            sp_kmh = prio_speed_kmh
+            sp_mps = prio_speed_kmh / 3.6
         a = Agent(aid, origin, dest, round_trip, aid, [], [], service_s,
                   0, 0.0, sp_mps, sp_kmh, contingency=contingency)
+        a.is_priority = is_prio
         a.cont_frac = float(rng.uniform(0.3, 0.7))
         a.battery_wh = battery_wh * start_pct
         agents.append(a)
@@ -493,8 +515,11 @@ def build_fleet(net: Network, params, rng: np.random.Generator):
     for a in agents:
         a.arrival_t = float(rng.uniform(0.0, arr_win_s)) if arr_win_s > 0 else 0.0
     agents.sort(key=lambda a: a.arrival_t)
+    # priority = release/tie-break rank (lower goes first). Priority missions get
+    # an n-agent bonus so they win launch/merge TIES (arrival time and remaining
+    # leg distance still dominate, so this nudges rather than starves others).
     for p, a in enumerate(agents):
-        a.priority = p
+        a.priority = (p - n) if a.is_priority else p
 
     # ---- city-monitoring patrols: one sortie launched every INTERVAL ----
     patrol_kmh = float(pget(params, "PATROL_SPEED_KMH", 50.0))
@@ -556,10 +581,10 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     min_dest_idle = float(pget(params, "MIN_DEST_IDLE_S", 300.0))
     e_p0 = float(pget(params, "HOVER_POWER_W", 220.0))
     e_cd = float(pget(params, "DRAG_POWER_COEF", 0.050))
-    # slowness cost-map (from step 08): true velocity = slowness * base speed.
+    # slowness cost-map (from step 09): true velocity = slowness * base speed.
     # Routes are unaffected (fixed) -- the map only modulates travel speed.
     cost_map = load_costmap(pget(params, "COST_MAP_FILE",
-                                 "output/08_costmap/slowness_costmap.npz"))
+                                 "output/09_costmap/slowness_costmap.npz"))
     if cost_map is not None:
         cm_grid, cm_x0, cm_y0, cm_res, cm_nx, cm_ny = cost_map
 
@@ -623,6 +648,10 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     def zone_cost(lg, a):
         """Fast agents pay to use inner legs (steered to the OUTER zone);
         slow agents pay to use outer legs (kept to short inner routes)."""
+        # priority missions are exempt: they take the DIRECT (often inner) spine
+        # rather than being steered onto longer outer detours
+        if getattr(a, "is_priority", False):
+            return 0.0
         o = outerness.get(lg, 0.5)
         if a.speed_kmh >= fast_kmh:
             return zone_bias * (1.0 - o)
@@ -1184,9 +1213,56 @@ def draw_network(ax, net: Network):
     ax.set_ylabel("y (m)")
 
 
-def plot_network_traffic(net: Network, agents, out_png: Path):
+def draw_obstacles(ax, model_file, zorder=0.5):
+    """Overlay step-01 obstacles (gray) and restricted / no-fly RA cells
+    (orange) from the planning-model .xyz grid. Returns legend handles for
+    the categories actually drawn (empty if the file is missing/unusable)."""
+    from matplotlib.colors import ListedColormap
+    from matplotlib.patches import Patch
+    import numpy.ma as ma
+    p = THIS_DIR / str(model_file)
+    if not p.exists():
+        return []
+    df = pd.read_csv(p, sep=r"\s+")
+    if not {"x", "y", "obstacle_flag"}.issubset(df.columns):
+        return []
+    xs = np.sort(df["x"].unique()); ys = np.sort(df["y"].unique())
+    if len(xs) < 2 or len(ys) < 2:
+        return []
+    dx = xs[1] - xs[0]; dy = ys[1] - ys[0]
+    ix = np.rint((df["x"].to_numpy() - xs[0]) / dx).astype(int)
+    iy = np.rint((df["y"].to_numpy() - ys[0]) / dy).astype(int)
+    obst = np.zeros((len(ys), len(xs))); obst[iy, ix] = df["obstacle_flag"].to_numpy()
+    ra = np.zeros_like(obst)
+    if "ra_flag" in df.columns:
+        ra[iy, ix] = df["ra_flag"].to_numpy()
+    extent = (xs[0] - dx / 2, xs[-1] + dx / 2, ys[0] - dy / 2, ys[-1] + dy / 2)
+    handles = []
+    ra_only = (ra > 0) & (obst == 0)
+    if ra_only.any():
+        ax.imshow(ma.masked_where(~ra_only, ra_only), extent=extent, origin="lower",
+                  cmap=ListedColormap(["#e67e22"]), alpha=0.28, zorder=zorder,
+                  interpolation="nearest", aspect="auto")
+        handles.append(Patch(facecolor="#e67e22", alpha=0.45, label="restricted / no-fly (RA)"))
+    if (obst > 0).any():
+        ax.imshow(ma.masked_where(obst == 0, obst), extent=extent, origin="lower",
+                  cmap=ListedColormap(["#4d4d4d"]), alpha=0.42, zorder=zorder + 0.05,
+                  interpolation="nearest", aspect="auto")
+        handles.append(Patch(facecolor="#4d4d4d", alpha=0.55, label="obstacle"))
+    return handles
+
+
+def plot_network_traffic(net: Network, agents, out_png: Path, obstacle_file=None):
     fig, ax = plt.subplots(figsize=(13, 11))
+    obs_handles = draw_obstacles(ax, obstacle_file) if obstacle_file else []
     draw_network(ax, net)
+    # label the traffic nodes: MAJ* (major) in red, MIN* (minor) in gray
+    nid = net.nodes["net_id"].astype(str)
+    for prefix, color in (("MAJ", "#c0392b"), ("MIN", "#7f8c8d")):
+        for r in net.nodes[nid.str.startswith(prefix)].itertuples():
+            ax.annotate(str(r.net_id), (r.x, r.y), textcoords="offset points",
+                        xytext=(4, 3), fontsize=6.5, color=color, weight="bold",
+                        zorder=7)
     for a in agents:
         for seg in a.segs:
             if seg is None:
@@ -1200,7 +1276,7 @@ def plot_network_traffic(net: Network, agents, out_png: Path):
         Line2D([0], [0], marker="^", color="w", markerfacecolor="#1f6f3f",
                markeredgecolor="k", markersize=10, label="DK delivery"),
         Line2D([0], [0], color="#3a7bd5", lw=3, alpha=0.5, label="flown routes"),
-    ]
+    ] + obs_handles
     ax.legend(handles=handles, loc="upper right", framealpha=0.9)
     ax.set_title(f"Corridor traffic - {len(agents)} agent missions (flown route overlay)")
     add_map_rule(ax)
@@ -1415,11 +1491,11 @@ def write_html(net: Network, frames, params, sep_eff, out_html: Path):
     ally = [p[1] for pl in lanes for p in pl] + [o["y"] for o in objs]
     bbox = [min(allx), min(ally), max(allx), max(ally)]
 
-    # slowness cost-map (step 08) as a background layer, if present. Stored as
+    # slowness cost-map (step 09) as a background layer, if present. Stored as
     # a flat row-major grid of slowness*1000 ints to keep the file compact.
     costmap = None
     cm_path = THIS_DIR / str(pget(params, "COST_MAP_FILE",
-                                  "output/08_costmap/slowness_costmap.npz"))
+                                  "output/09_costmap/slowness_costmap.npz"))
     if cm_path.exists():
         z = np.load(cm_path)
         g = z["slowness"].astype(float)
@@ -1570,7 +1646,7 @@ const ox = (W-(x1-x0)*sc)/2, oy = (H-(y1-y0)*sc)/2;
 const TX = x => ox + (x-x0)*sc;
 const TY = y => H - (oy + (y-y0)*sc);   // flip Y so north is up
 
-// ---- slowness cost-map background layer (step 08) ----
+// ---- slowness cost-map background layer (step 09) ----
 // RdYlGn-style ramp: low slowness (congested / outside corridor) = red,
 // high slowness (full speed) = green. Matches slowness_costmap.png.
 function slowColor(t){
@@ -1798,7 +1874,7 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
 
     costmap = None
     cm_path = THIS_DIR / str(pget(params, "COST_MAP_FILE",
-                                  "output/08_costmap/slowness_costmap.npz"))
+                                  "output/09_costmap/slowness_costmap.npz"))
     if cm_path.exists():
         z = np.load(cm_path)
         g = z["slowness"].astype(float)
@@ -2333,13 +2409,13 @@ def main() -> None:
         params["MAX_CONCURRENT"] = args.concurrent
 
     corridor_dir = THIS_DIR / str(pget(params, "CORRIDOR_DIR", "output/07_corridor_network"))
-    output_dir = THIS_DIR / str(pget(params, "OUTPUT_DIR", "output/09_agent_sim_2d"))
+    output_dir = THIS_DIR / str(pget(params, "OUTPUT_DIR", "output/10_agent_sim_2d"))
     fig_dir = output_dir / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
-    print(f"09_simulate_agents_2d.py  {VERSION}")
+    print(f"10_simulate_agents_2d.py  {VERSION}")
     print(f"Param file    : {args.param_file}")
     print(f"Corridor dir  : {corridor_dir}")
     print(f"Output dir    : {output_dir}")
@@ -2415,7 +2491,7 @@ def main() -> None:
         print(f"Cost-map      : slowness field applied (min slowness "
               f"{stats['cost_map_min_slowness']:.2f}); true velocity = slowness x base speed")
     else:
-        print(f"Cost-map      : none (run 08_generate_costmap.py first); base speeds used")
+        print(f"Cost-map      : none (run 09_generate_costmap.py first); base speeds used")
     if stats["flow_mode"] != "spacing":
         print(f"Leg rule      : max agents on any one leg = {stats['max_agents_per_leg']} -> "
               f"{'OK (<=1)' if stats['max_agents_per_leg'] <= 1 else 'VIOLATION'}")
@@ -2568,7 +2644,10 @@ def main() -> None:
         json.dump(metrics, f, indent=2)
 
     print("Plotting ...")
-    plot_network_traffic(net, agents, fig_dir / "00_network_traffic.png")
+    plot_network_traffic(net, agents, fig_dir / "00_network_traffic.png",
+                         obstacle_file=pget(params, "OBSTACLE_MODEL_FILE",
+                                            "output/02_thetastar_master_plan/"
+                                            "planning_model_with_flz_support.xyz"))
     plot_density(net, frames, fig_dir / "01_density.png", stats.get("conflict_pts"))
     plot_timeline(timeline, sep_eff, fig_dir / "02_timeline.png", stats["peak_concurrent"])
     plot_energy(agents, params, fig_dir / "03_energy.png")

@@ -150,3 +150,32 @@ PLOT_DPI = 250
 # gray corridor boundary) under figures/route_with_legs/.
 SAVE_ROUTE_FIGURES = True
 LEG_FIGURE_DPI = 160
+
+# ----------------------------------------------------------------------
+# Roundabouts (fat ring-nodes at high-degree junction areas)
+# ----------------------------------------------------------------------
+# Before routing settles, junction AREAS where many corridors meet (a TN
+# node -- or a tight cluster of them -- carrying >= MIN_DEGREE legs) are
+# REPLACED by a roundabout: one "fat" ring-node at the cluster centre with
+# an optimally-sized radius. The ring inherits the members' shared cost
+# identity; the member nodes + their internal legs are removed, the legs
+# rebuild onto the ring and are clipped to its boundary. Outputs
+# roundabouts.csv + roundabout_members.csv and draws the rings on
+# 00_corridor_network.png. Set ROUNDABOUT_ENABLE=False to disable.
+ROUNDABOUT_ENABLE            = True
+ROUNDABOUT_MIN_DEGREE        = 5       # min incident legs for a node to seed a ring
+ROUNDABOUT_MERGE_RADIUS_M    = 320.0   # cluster/absorb nodes within this radius
+ROUNDABOUT_MIN_RADIUS_M      = 120.0   # smallest ring radius
+ROUNDABOUT_MAX_RADIUS_M      = 450.0   # largest ring radius
+ROUNDABOUT_MEMBER_MARGIN_M   = 40.0    # ring encircles members + this margin
+# Ring size scales with TRAFFIC DENSITY: radius += GAIN * (entering legs), so
+# busier junctions get a bigger roundabout.
+ROUNDABOUT_DENSITY_GAIN_M    = 18.0    # extra radius per entering leg
+ROUNDABOUT_LANE_GAP_M        = 50.0    # gap between outer (red) and inner (blue) ring lane
+ROUNDABOUT_OBSTACLE_CLEARANCE_M = 40.0 # keep ring this far from no-fly cells
+ROUNDABOUT_RING_GAP_M        = 40.0    # min gap between two rings
+# When a ring cannot fit (obstacle / another ring) the CENTRE is nudged away
+# (estimated from centre+radius) up to NUDGE_MAX over NUDGE_PASSES before the
+# radius is shrunk as a last resort.
+ROUNDABOUT_NUDGE_MAX_M       = 200.0   # max centre displacement per fit pass
+ROUNDABOUT_NUDGE_PASSES      = 4       # nudge iterations

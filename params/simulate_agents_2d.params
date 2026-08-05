@@ -1,5 +1,5 @@
 # ======================================================================
-# Multi-agent 2D corridor traffic simulation (08_simulate_agents_2d.py)
+# Multi-agent 2D corridor traffic simulation (10_simulate_agents_2d.py)
 # ======================================================================
 # A fleet of UAV agents flies missions between the DB (depot) and DK
 # (delivery) objectives on the two-lane corridor network from step 07,
@@ -18,10 +18,14 @@
 
 # Input / output ------------------------------------------------------
 CORRIDOR_DIR = "output/07_corridor_network"
-OUTPUT_DIR   = "output/09_agent_sim_2d"
-# Slowness cost-map from 08_generate_costmap.py (true velocity = slowness x
+OUTPUT_DIR   = "output/10_agent_sim_2d"
+# Slowness cost-map from 09_generate_costmap.py (true velocity = slowness x
 # base speed). If the file is absent, base speeds are used.
-COST_MAP_FILE = "output/08_costmap/slowness_costmap.npz"
+COST_MAP_FILE = "output/09_costmap/slowness_costmap.npz"
+# Planning-model .xyz grid from step 02 (has obstacle_flag / ra_flag); its
+# obstacles + no-fly (RA) cells are overlaid on 00_network_traffic.png. Absent
+# -> no overlay.
+OBSTACLE_MODEL_FILE = "output/02_thetastar_master_plan/planning_model_with_flz_support.xyz"
 
 # Fleet ---------------------------------------------------------------
 N_AGENTS        = 1000       # total delivery missions (demand)
@@ -53,6 +57,43 @@ CHARGE_TARGET_PCT = 0.9      # must reach 90% battery before leaving a dock
 # UAV speed classes ---------------------------------------------------
 SPEED_CLASSES_KMH   = [60.0, 50.0, 30.0]   # 3 UAV classes
 SPEED_CLASS_WEIGHTS = [1.0, 1.0, 1.0]      # selection weights (normalised)
+
+# Route-aware priority ------------------------------------------------
+# Missions whose ORIGIN or DEST is one of these objective labels are
+# prioritised: exempted from the inner/outer ZONE_BIAS_M steering (they take
+# the DIRECT spine), given launch/merge precedence, and (if PRIORITY_FORCE_SPEED)
+# forced to PRIORITY_SPEED_KMH. The DB01 hub is the network's congestion
+# bottleneck (its egress legs DB01-MIN005 / DB01-MIN003 carry ~72% of all
+# holding delay and ~90% of battery deaths).
+#
+# EMPIRICAL FINDING (seed 12345, 1000 agents) -- prioritising DB01 traffic does
+# NOT improve on-time throughput and in fact HURTS it:
+#     config              done  batt_dead  @1h%  @3h%  @5h%  end_h
+#     baseline (OFF)      902   98         17.9  59.7  87.6  6.3
+#     DB01 force 60km/h   916   84          8.6  38.9  82.0  9.5
+#     DB01 access+precede 860  140          7.2  38.5  83.4  5.9
+# Cause: separation is a TIME headway, so a leg's throughput = 1/headway is
+# INDEPENDENT of speed; "travel faster" cannot add bottleneck capacity, and
+# forcing priority traffic fast only lowers lane density (more spacing) while
+# front-loading the launch queue with bottleneck-bound agents starves the
+# spare-capacity outer routes.
+# The one upside of force-60: fewer battery deaths (98->84) and less energy
+# (90.9->80.5 kWh), because faster transit cuts hover-time during holds.
+#
+# NOTE: adding a 3rd DB01 egress corridor was TESTED and also did NOT help
+# (DB01->MAJ007 890/206-dead; DB01->MAJ012 890/110-dead vs baseline 902/98).
+# DB01 sits in the high-risk map core -- every southbound corridor has mean
+# slowness 0.2-0.5, so any added leg is inherently slow to fly, and the step-09
+# router plans on GEOMETRIC LENGTH (risk-blind) so it over-uses the short-but-
+# risky new leg. The binding limit is the launch backlog (peak 999, ~103 min
+# wait): 1000 missions at t=0 vs ~150 concurrent low-risk-airspace capacity.
+# Effective fixes = RISK-AWARE routing (cost=length/slowness; cf. step 11 FMM
+# planner) + DEMAND SMOOTHING (ARRIVAL_WINDOW_H>0), NOT more corridors.
+#
+# Left OFF by default (empty list) so the canonical pipeline is not degraded.
+PRIORITY_ORIGIN_LABELS = []                # e.g. ["DB01"] to prioritise DB01 traffic
+PRIORITY_FORCE_SPEED   = True              # force priority missions to PRIORITY_SPEED_KMH
+PRIORITY_SPEED_KMH     = 60.0              # speed class forced on priority missions
 
 # City-monitoring patrols ---------------------------------------------
 # One patrol sortie takes off every PATROL_INTERVAL_MIN minutes and flies
@@ -150,7 +191,7 @@ SAMPLE_EVERY_S   = 20.0       # record a timeline/animation frame this often (fi
 MAX_GIF_FRAMES   = 360        # subsample frames down to at most this many
 GIF_FPS          = 20
 MAKE_HTML        = True        # self-contained interactive 2D agents_animation.html
-# Per-agent route replays under output/09_agent_sim_2d/agent_route/ (one HTML per
+# Per-agent route replays under output/10_agent_sim_2d/agent_route/ (one HTML per
 # agent + index.html) to inspect each agent's travel. MAX = -1 -> all agents.
 MAKE_AGENT_ROUTE_HTML     = True
 AGENT_ROUTE_MAX           = -1

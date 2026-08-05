@@ -62,6 +62,7 @@ import heapq
 import importlib.util
 import math
 import sys
+from collections import Counter, defaultdict
 from pathlib import Path
 from typing import Any
 
@@ -1172,7 +1173,7 @@ def plot_route_with_legs(
     plt.close(fig)
 
 
-def plot_network(df: pd.DataFrame, nodes: pd.DataFrame, legs: pd.DataFrame, lanes: pd.DataFrame, out: Path, params: dict[str, Any]) -> None:
+def plot_network(df: pd.DataFrame, nodes: pd.DataFrame, legs: pd.DataFrame, lanes: pd.DataFrame, out: Path, params: dict[str, Any], roundabouts: pd.DataFrame | None = None) -> None:
     """Whole-network overview with the same corridor styling."""
     half_w = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))
     node_r = 0.5 * float(M6.pget(params, "NODE_CIRCLE_DIAMETER_M", 50.0))
@@ -1187,8 +1188,42 @@ def plot_network(df: pd.DataFrame, nodes: pd.DataFrame, legs: pd.DataFrame, lane
     for _, leg in legs.iterrows():
         _draw_leg_corridors(ax, lanes, leg["leg_id"], half_w, lw=1.0)
 
-    _node_circle_patches(ax, nodes, node_r)
-    _plot_nodes(ax, nodes, labels=True, fontsize=6.5)
+    # roundabout rings: two concentric CIRCULAR CORRIDORS (outer red = lane A,
+    # inner blue = lane B), each with the corridor buffer band, + the entry
+    # meeting points on the ring edges
+    if roundabouts is not None and len(roundabouts):
+        lane_gap = float(M6.pget(params, "ROUNDABOUT_LANE_GAP_M", 50.0))
+        ringmap = {}
+        for _, r in roundabouts.iterrows():
+            c = (float(r["center_x"]), float(r["center_y"]))
+            r_out = float(r["radius_m"])
+            r_in = max(0.3 * r_out, r_out - lane_gap)
+            for rr, col in ((r_out, "red"), (r_in, "blue")):
+                ax.add_patch(Circle(c, rr + half_w, fill=False, ec="0.6", lw=0.7, zorder=17))
+                ax.add_patch(Circle(c, max(1.0, rr - half_w), fill=False, ec="0.6", lw=0.7, zorder=17))
+                ax.add_patch(Circle(c, rr, fill=False, ec=col, lw=1.8, zorder=18))
+            ax.text(c[0], c[1], str(r["rbt_id"]), color="#d35400", fontsize=7.5,
+                    weight="bold", ha="center", va="center", zorder=21)
+            ringmap[str(r["rbt_id"])] = np.array(c, float)
+        ex, ey = [], []
+        for _, leg in legs.iterrows():
+            pxy = np.asarray(leg["path_xy"], float)
+            if len(pxy) < 1:
+                continue
+            for nid in (str(leg["a_id"]), str(leg["b_id"])):
+                if nid in ringmap:
+                    cc = ringmap[nid]
+                    e = pxy[0] if np.hypot(*(pxy[0] - cc)) < np.hypot(*(pxy[-1] - cc)) else pxy[-1]
+                    ex.append(e[0]); ey.append(e[1])
+        if ex:
+            ax.scatter(ex, ey, s=18, c="#d35400", edgecolors="k", linewidths=0.4,
+                       zorder=22, label="ring entry")
+        ax.plot([], [], "-", color="red", lw=2.0, label="roundabout outer lane")
+        ax.plot([], [], "-", color="blue", lw=2.0, label="roundabout inner lane")
+
+    node_circle_nodes = nodes[nodes["kind"] != "roundabout"] if "kind" in nodes.columns else nodes
+    _node_circle_patches(ax, node_circle_nodes, node_r)
+    _plot_nodes(ax, node_circle_nodes, labels=True, fontsize=6.5)
     if "node_shift_m" in nodes.columns:
         moved = nodes[nodes["node_shift_m"] > 0]
         for _, r in moved.iterrows():
@@ -1215,6 +1250,300 @@ def plot_network(df: pd.DataFrame, nodes: pd.DataFrame, legs: pd.DataFrame, lane
     out.parent.mkdir(parents=True, exist_ok=True)
     fig.savefig(out, dpi=int(M6.pget(params, "PLOT_DPI", 250)))
     plt.close(fig)
+
+
+# ======================================================================
+# Roundabouts: fat ring-nodes at high-degree junction areas
+# ======================================================================
+#
+# Where many corridors meet at one traffic node (or a tight cluster of
+# them) the point-junction serialises all the crossing/merging traffic
+# -> holding (the core bottleneck). BEFORE the routes settle, such areas
+# are REPLACED by a ROUNDABOUT: a single "fat" ring-node placed at the
+# cluster centre with an optimally-sized radius. It carries the shared
+# cost identity (model_idx) of the member nodes it absorbs; the members
+# (and their internal member-member legs) are removed, so on the network
+# rebuild the surrounding legs re-connect straight to the ring node and
+# are then CLIPPED to its boundary -- "the legs connect to the ring".
+
+def _clip_polyline_to_circle(xy: np.ndarray, center: np.ndarray, radius: float) -> np.ndarray:
+    """Trim a polyline oriented OUTSIDE(0) -> ring-centre(-1) so it stops
+    ON the ring boundary. Returns the outside part plus the boundary hit."""
+    xy = np.asarray(xy, float)
+    if len(xy) < 2:
+        return xy
+    d = np.hypot(xy[:, 0] - center[0], xy[:, 1] - center[1])
+    inside = d <= radius
+    if not inside.any():
+        return xy                              # never reaches the ring
+    k = int(np.argmax(inside))                 # first point inside the circle
+    if k == 0:
+        return xy[:1]                          # whole polyline inside (degenerate)
+    p0, p1 = xy[k - 1], xy[k]
+    seg = p1 - p0
+    a = float(seg @ seg)
+    b = float(2.0 * seg @ (p0 - center))
+    c = float((p0 - center) @ (p0 - center) - radius * radius)
+    t = 1.0
+    if a > 1e-9:
+        disc = b * b - 4 * a * c
+        if disc >= 0:
+            # p0 is OUTSIDE, p1 INSIDE -> the boundary crossing is the NEAR
+            # (entry) root, i.e. the smaller t (use -sqrt, not +sqrt)
+            t = min(1.0, max(0.0, (-b - math.sqrt(disc)) / (2.0 * a)))
+    hit = p0 + t * seg
+    return np.vstack([xy[:k], hit])
+
+
+def _clip_end_at_ring(xy: np.ndarray, center: np.ndarray, radius: float) -> np.ndarray:
+    """Clip whichever END of a polyline lands inside the ring to its boundary."""
+    xy = np.asarray(xy, float)
+    if len(xy) < 2:
+        return xy
+    d0 = np.hypot(*(xy[0] - center))
+    d1 = np.hypot(*(xy[-1] - center))
+    if d0 < d1:                                # ring end is index 0 -> flip, clip, flip
+        return _clip_polyline_to_circle(xy[::-1], center, radius)[::-1]
+    return _clip_polyline_to_circle(xy, center, radius)
+
+
+def _fit_ring(center: np.ndarray, radius: float, nofly_tree,
+              ring_geo: list, obst_clr: float, ring_gap: float,
+              nudge_max: float, nudge_passes: int) -> tuple[np.ndarray, float]:
+    """Fit a ring of the DESIRED radius by first NUDGING the centre away
+    from the nearest obstacle / other rings (estimated from centre+radius),
+    only shrinking the radius as a last resort. Returns (centre, radius)."""
+    center = np.asarray(center, float).copy()
+    for _ in range(max(1, nudge_passes)):
+        moved = False
+        if nofly_tree is not None:                      # push off the nearest no-fly cell
+            d, idx = nofly_tree.query(center, k=1)
+            need = radius + obst_clr - float(d)
+            if need > 1.0:
+                obs = np.asarray(nofly_tree.data[int(idx)], float)
+                v = center - obs
+                n = float(np.hypot(*v)) or 1.0
+                center = center + (v / n) * min(need, nudge_max)
+                moved = True
+        for (_id, oc, orad) in ring_geo:                # push off overlapping rings
+            v = center - oc
+            dd = float(np.hypot(*v)) or 1.0
+            need = radius + orad + ring_gap - dd
+            if need > 1.0:
+                center = center + (v / dd) * min(need, nudge_max)
+                moved = True
+        if not moved:
+            break
+    # whatever overlap survives the nudging is removed by shrinking
+    if nofly_tree is not None:
+        d, _ = nofly_tree.query(center, k=1)
+        radius = min(radius, float(d) - obst_clr)
+    for (_id, oc, orad) in ring_geo:
+        radius = min(radius, float(np.hypot(*(center - oc))) - orad - ring_gap)
+    return center, radius
+
+
+def build_roundabouts(nodes: pd.DataFrame, legs: pd.DataFrame, nofly_tree,
+                      params: dict[str, Any]):
+    """Replace high-degree TN junction areas with roundabout ring-nodes.
+    Returns (new_nodes, roundabouts_df, members_df). Empty frames when the
+    feature is off or no qualifying junction exists."""
+    empty = (pd.DataFrame(), pd.DataFrame())
+    if not bool(M6.pget(params, "ROUNDABOUT_ENABLE", True)) or not len(legs):
+        return nodes, *empty
+    min_deg   = int(M6.pget(params, "ROUNDABOUT_MIN_DEGREE", 5))
+    merge_r   = float(M6.pget(params, "ROUNDABOUT_MERGE_RADIUS_M", 320.0))
+    min_rad   = float(M6.pget(params, "ROUNDABOUT_MIN_RADIUS_M", 120.0))
+    max_rad   = float(M6.pget(params, "ROUNDABOUT_MAX_RADIUS_M", 450.0))
+    margin    = float(M6.pget(params, "ROUNDABOUT_MEMBER_MARGIN_M", 40.0))
+    obst_clr  = float(M6.pget(params, "ROUNDABOUT_OBSTACLE_CLEARANCE_M", 40.0))
+    ring_gap  = float(M6.pget(params, "ROUNDABOUT_RING_GAP_M", 40.0))
+    dens_gain = float(M6.pget(params, "ROUNDABOUT_DENSITY_GAIN_M", 18.0))
+    nudge_max = float(M6.pget(params, "ROUNDABOUT_NUDGE_MAX_M", 200.0))
+    nudge_n   = int(M6.pget(params, "ROUNDABOUT_NUDGE_PASSES", 4))
+    half_w    = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))  # ring is a buffered corridor
+
+    # degree = number of incident legs per node ("multiple connect legs")
+    deg = Counter()
+    for a, b in zip(legs["a_id"].astype(str), legs["b_id"].astype(str)):
+        deg[a] += 1
+        deg[b] += 1
+    la = legs["a_id"].astype(str).to_numpy()
+    lb = legs["b_id"].astype(str).to_numpy()
+
+    kind = nodes["kind"].astype(str)
+    is_tn = kind.str.startswith("tn_") & ~nodes["kind"].isin(["tn_backup", "tn_ext"])
+    nid = nodes["net_id"].astype(str)
+    seed_mask = is_tn & nid.map(lambda n: deg.get(n, 0) >= min_deg)
+    seeds = nodes[seed_mask].reset_index(drop=True)
+    if not len(seeds):
+        return nodes, *empty
+
+    # single-linkage clustering of seeds within merge_r
+    sxy = seeds[["x", "y"]].to_numpy(float)
+    parent = list(range(len(seeds)))
+    def find(a):
+        r = a
+        while parent[r] != r:
+            r = parent[r]
+        while parent[a] != r:
+            parent[a], a = r, parent[a]
+        return r
+    for i in range(len(seeds)):
+        for j in range(i + 1, len(seeds)):
+            if np.hypot(*(sxy[i] - sxy[j])) <= merge_r:
+                parent[find(i)] = find(j)
+    clusters = defaultdict(list)
+    for i in range(len(seeds)):
+        clusters[find(i)].append(i)
+
+    tn_all = nodes[kind.str.startswith("tn_")].copy()
+    used: set[str] = set()
+    rbt_rows: list[dict] = []
+    member_rows: list[dict] = []
+    ring_geo: list[tuple[str, np.ndarray, float]] = []
+    rid = 0
+    for _, idxs in sorted(clusters.items(), key=lambda kv: (-len(kv[1]), kv[0])):
+        seed_ids = [str(seeds.iloc[i]["net_id"]) for i in idxs]
+        members = set(seed_ids)
+        # absorb nearby TN nodes within merge_r of any seed in the cluster
+        for _, tr in tn_all.iterrows():
+            m = str(tr["net_id"])
+            if m in used or m in members:
+                continue
+            if any(np.hypot(tr["x"] - seeds.iloc[i]["x"],
+                            tr["y"] - seeds.iloc[i]["y"]) <= merge_r for i in idxs):
+                members.add(m)
+        mem_df = nodes[nid.isin(members)]
+        mxy = mem_df[["x", "y"]].to_numpy(float)
+        center = mxy.mean(0)
+        spread = (float(np.max(np.hypot(mxy[:, 0] - center[0], mxy[:, 1] - center[1])))
+                  if len(mxy) > 1 else 0.0)
+        # traffic DENSITY = # legs entering the cluster (exactly one endpoint a
+        # member). Busier junctions get a bigger ring.
+        mem_arr = np.array(list(members))
+        entries = int(np.sum(np.isin(la, mem_arr) ^ np.isin(lb, mem_arr)))
+        # the ring is a BUFFERED circular corridor (half_w each side), so members
+        # within R_out + half_w are already covered -> the ring can be half_w smaller
+        desired = min(max_rad, max(min_rad, spread + margin - half_w) + dens_gain * entries)
+        # fit by NUDGING the centre off obstacles/rings first, shrink only if needed
+        center, radius = _fit_ring(center, desired, nofly_tree, ring_geo,
+                                   obst_clr, ring_gap, nudge_max, nudge_n)
+        if radius + half_w < 0.9 * spread or radius < 0.5 * min_rad:
+            continue                                        # no room -> leave point nodes
+        rid += 1
+        rbt_id = f"RBT{rid:02d}"
+        ring_geo.append((rbt_id, center, radius))
+        used |= members
+        seed_member = max(members, key=lambda n: deg.get(n, 0))     # shared cost identity
+        smi = int(nodes.loc[nid == seed_member, "model_idx"].iloc[0])
+        rbt_rows.append({
+            "rbt_id": rbt_id, "center_x": float(center[0]), "center_y": float(center[1]),
+            "radius_m": float(radius), "n_members": len(members), "n_entries": entries,
+            "members": "+".join(sorted(members)), "cost_from": seed_member, "model_idx": smi,
+        })
+        for m in sorted(members):
+            member_rows.append({"rbt_id": rbt_id, "node": m,
+                                "degree": deg.get(m, 0), "is_seed": m in seed_ids})
+
+    if not rbt_rows:
+        return nodes, *empty
+    roundabouts = pd.DataFrame(rbt_rows)
+
+    # rebuild node table: drop absorbed members, append ring nodes
+    keep = nodes[~nid.isin(used)].copy()
+    ring_nodes = pd.DataFrame([{
+        "net_id": r["rbt_id"], "kind": "roundabout", "label_prefix": "RBT",
+        "model_idx": int(r["model_idx"]), "x": r["center_x"], "y": r["center_y"],
+        "x_orig": r["center_x"], "y_orig": r["center_y"], "node_shift_m": 0.0,
+        "radius_m": r["radius_m"], "members": r["members"],
+    } for _, r in roundabouts.iterrows()])
+    new_nodes = pd.concat([keep, ring_nodes], ignore_index=True)
+    for col, fill in (("radius_m", 0.0), ("members", "")):
+        if col not in new_nodes.columns:
+            new_nodes[col] = fill
+        new_nodes[col] = new_nodes[col].fillna(fill)
+    new_nodes["net_node"] = np.arange(len(new_nodes), dtype=int)
+    return new_nodes, roundabouts, pd.DataFrame(member_rows)
+
+
+def remove_legs_through_rings(legs: pd.DataFrame, lanes: pd.DataFrame,
+                              roundabouts: pd.DataFrame):
+    """Drop any leg whose centerline crosses a ring disk it does NOT connect
+    to -- that traffic must route THROUGH the roundabout (e.g. an A-B leg that
+    happens to pass straight over ring C is removed; A-C-B is used instead)."""
+    if not len(roundabouts) or not len(legs):
+        return legs, lanes, set()
+    ring = {str(r["rbt_id"]): (np.array([r["center_x"], r["center_y"]], float),
+                               float(r["radius_m"])) for _, r in roundabouts.iterrows()}
+
+    def seg_dist(P, A, B):
+        AB = B - A
+        L2 = float(AB @ AB) or 1.0
+        t = min(1.0, max(0.0, float((P - A) @ AB) / L2))
+        return float(np.hypot(*(A + t * AB - P)))
+
+    drop = set()
+    for _, leg in legs.iterrows():
+        xy = np.asarray(leg["path_xy"], float)
+        if len(xy) < 2:
+            continue
+        for rid, (c, R) in ring.items():
+            if str(leg["a_id"]) == rid or str(leg["b_id"]) == rid:
+                continue
+            if min(seg_dist(c, xy[i], xy[i + 1]) for i in range(len(xy) - 1)) < R - 1.0:
+                drop.add(str(leg["leg_id"]))
+                break
+    if drop:
+        legs = legs[~legs["leg_id"].astype(str).isin(drop)].reset_index(drop=True)
+        if len(lanes):
+            lanes = lanes[~lanes["leg_id"].astype(str).isin(drop)].reset_index(drop=True)
+    return legs, lanes, drop
+
+
+def clip_legs_to_rings(legs: pd.DataFrame, lanes: pd.DataFrame,
+                       roundabouts: pd.DataFrame, params: dict[str, Any]):
+    """Cut every ring-incident leg at the ring, REMOVING the interior segment.
+    A two-lane roundabout has an OUTER (red, lane A) and INNER (blue, lane B)
+    circulating lane: the red corridor lane meets the outer ring, the blue lane
+    penetrates to the inner ring (crossing the outer one)."""
+    if not len(roundabouts) or not len(legs):
+        return legs, lanes
+    lane_gap = float(M6.pget(params, "ROUNDABOUT_LANE_GAP_M", 50.0))
+    # (centre, R_outer, R_inner) per ring
+    ring = {str(r["rbt_id"]): (np.array([r["center_x"], r["center_y"]], float),
+                               float(r["radius_m"]),
+                               max(0.3 * float(r["radius_m"]), float(r["radius_m"]) - lane_gap))
+            for _, r in roundabouts.iterrows()}
+    legs = legs.reset_index(drop=True).copy()
+    new_paths, new_len = [], []
+    for _, leg in legs.iterrows():
+        pxy = np.asarray(leg["path_xy"], float).copy()
+        for nid in (str(leg["a_id"]), str(leg["b_id"])):
+            if nid in ring:
+                c, r_out, _r_in = ring[nid]
+                pxy = _clip_end_at_ring(pxy, c, r_out)          # centerline -> outer
+        new_paths.append(pxy)
+        new_len.append(float(np.hypot(np.diff(pxy[:, 0]), np.diff(pxy[:, 1])).sum())
+                       if len(pxy) >= 2 else 0.0)
+    legs["path_xy"] = new_paths          # whole-column assign (reliable for arrays)
+    legs["length_m"] = new_len
+
+    if len(lanes):
+        ends = {str(r["leg_id"]): (str(r["a_id"]), str(r["b_id"])) for _, r in legs.iterrows()}
+        out = []
+        for (lid, lane), g in lanes.groupby(["leg_id", "lane"]):
+            lxy = g.sort_values("seq")[["x", "y"]].to_numpy(float)
+            for nid in ends.get(str(lid), ()):
+                if nid in ring:
+                    c, r_out, r_in = ring[nid]
+                    rad = r_out if str(lane) == "A" else r_in   # red->outer, blue->inner
+                    lxy = _clip_end_at_ring(lxy, c, rad)
+            for seq, (x, y) in enumerate(lxy):
+                out.append({"leg_id": lid, "lane": lane, "seq": int(seq),
+                            "x": float(x), "y": float(y)})
+        lanes = pd.DataFrame(out)
+    return legs, lanes
 
 
 # ======================================================================
@@ -1308,6 +1637,22 @@ def main() -> None:
             print(f"Node shift      : {n_m} node circles moved with their corridors -- rebuilding network")
             legs, lanes, lane_report = build_network(nodes)
 
+    # Roundabouts: replace high-degree junction areas with fat ring-nodes,
+    # rebuild the legs onto the rings, then clip them to the ring boundary.
+    roundabouts = pd.DataFrame()
+    nodes, roundabouts, rbt_members = build_roundabouts(nodes, legs, nofly_tree, params)
+    if len(roundabouts):
+        print(f"Roundabouts     : {len(roundabouts)} rings replace "
+              f"{len(rbt_members)} junction nodes -- rebuilding legs onto the rings")
+        legs, lanes, lane_report = build_network(nodes)
+        legs, lanes, dropped = remove_legs_through_rings(legs, lanes, roundabouts)
+        if dropped:
+            print(f"  drop {len(dropped)} leg(s) crossing a ring disk (route through it): "
+                  f"{', '.join(sorted(dropped))}")
+        legs, lanes = clip_legs_to_rings(legs, lanes, roundabouts, params)
+        for _, r in roundabouts.iterrows():
+            print(f"  {r['rbt_id']}: R={r['radius_m']:.0f} m  <- {r['members']}")
+
     two = int(lane_report["two_lanes"].sum())
     sep_ok = int(lane_report["separation_ok"].fillna(False).astype(bool).sum())
     n_tangent = int((lane_report["lane_b_method"] == "tangent_pair").sum())
@@ -1336,8 +1681,11 @@ def main() -> None:
     pair_routes_out["legs"] = pair_routes_out["leg_rows"].apply(lambda ks: ";".join(str(legs.iloc[int(k)]["leg_id"]) for k in ks))
     pair_routes_out["leg_directions"] = pair_routes_out["leg_forward"].apply(lambda fs: ";".join("fwd" if f else "rev" for f in fs))
     pair_routes_out.drop(columns=["leg_rows", "leg_forward"]).to_csv(output_dir / "pair_routes.csv", index=False)
+    if len(roundabouts):
+        roundabouts.to_csv(output_dir / "roundabouts.csv", index=False)
+        rbt_members.to_csv(output_dir / "roundabout_members.csv", index=False)
 
-    plot_network(df, nodes, legs, lanes, fig_dir / "00_corridor_network.png", params)
+    plot_network(df, nodes, legs, lanes, fig_dir / "00_corridor_network.png", params, roundabouts)
 
     if bool(M6.pget(params, "SAVE_ROUTE_FIGURES", True)):
         route_fig_dir.mkdir(parents=True, exist_ok=True)

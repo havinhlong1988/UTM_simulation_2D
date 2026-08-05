@@ -1,5 +1,5 @@
 # ======================================================================
-# FMM risk/conflict-aware route planning (10_fmm_route_plan.py)
+# FMM risk/conflict-aware route planning (11_fmm_route_plan.py)
 # ======================================================================
 # A NEW planning stage that plans one route per objective pair with the
 # Fast Marching Method (FMM) on a weighted cost field, instead of the fixed
@@ -10,7 +10,7 @@
 #
 #   cost = W_TIME     * 1                      (uniform -> path length / time)
 #        + W_RISK     * risk_norm  (step 01)   (obstacle + restricted-area risk)
-#        + W_CONFLICT * conflict_norm (step 08)(traffic density -> near-misses)
+#        + W_CONFLICT * conflict_norm (step 09)(traffic density -> near-misses)
 #
 # FMM propagates the accumulated cost from each destination; routes are the
 # steepest-descent (cost-minimising) paths back from each origin. Raising
@@ -20,9 +20,9 @@
 
 # Input / output ------------------------------------------------------
 RISK_XYZ      = "output/01_random_node_map/random_2d_node_riskmap_seed2443556934.xyz"
-COST_MAP_FILE = "output/08_costmap/slowness_costmap.npz"
+COST_MAP_FILE = "output/09_costmap/slowness_costmap.npz"
 CORRIDOR_DIR  = "output/07_corridor_network"
-OUT_DIR       = "output/10_fmm_routes"
+OUT_DIR       = "output/11_fmm_routes"
 
 # Objective pairs to plan. "corridor" -> the same pairs step 07 solved
 # (pair_routes.csv); "all" -> every ordered objective pair.
@@ -31,7 +31,7 @@ PAIR_SOURCE = "corridor"
 # Cost weights --------------------------------------------------------
 W_TIME     = 1.0     # travel time / path length
 W_RISK     = 2.0     # obstacle + RA risk exposure (step 01 risk_total)
-W_CONFLICT = 1.5     # traffic-density / conflict exposure (step 08)
+W_CONFLICT = 1.5     # traffic-density / conflict exposure (step 09)
 COST_FLOOR = 0.05    # min impedance on a free cell (FMM needs cost > 0)
 
 # Risk buffer ---------------------------------------------------------

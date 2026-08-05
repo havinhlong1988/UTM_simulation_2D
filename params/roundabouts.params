@@ -1,0 +1,64 @@
+# ======================================================================
+# Traffic-roundabout builder (08_build_roundabouts.py)
+# ======================================================================
+# Build one-way, multi-lane roundabouts at the network's high-conflict
+# junctions so agents circulate through instead of holding at a point node.
+# Runs after 07_build_corridor_network.py; output feeds the later stages.
+
+# Input / output ------------------------------------------------------
+CORRIDOR_DIR = "output/07_corridor_network"
+OUT_DIR      = "output/08_roundabout_network"
+# Planning-model grid (step 02) with obstacle_flag / ra_flag -- overlaid on the
+# figure so rings can be read against the obstacle field.
+OBSTACLE_MODEL_FILE = "output/02_thetastar_master_plan/planning_model_with_flz_support.xyz"
+
+# Node selection ------------------------------------------------------
+# A traffic node is a roundabout SEED when at least this many DB<->DK pair
+# routes traverse it (a self-contained conflict-density proxy; no sim needed).
+# Lower -> more/larger roundabouts.
+MIN_THROUGH_ROUTES = 4
+
+# Clustering ----------------------------------------------------------
+# Seeds within this distance are single-linkage merged into one roundabout,
+# and any nearby node within this distance of a member is absorbed too (so a
+# vicinity of junctions becomes one ring). ~320 m reproduces the sample
+# groupings MAJ012+MAJ007(+MIN007), MAJ006+MIN011, MAJ013+MIN002+MIN001, and
+# leaves isolated high nodes (e.g. MIN003) as single-node roundabouts.
+MERGE_RADIUS_M = 320.0
+
+# Ring geometry -------------------------------------------------------
+RING_MIN_RADIUS_M = 110.0    # desired inner-lane radius (upper bound on ring size)
+LANE_GAP_M        = 55.0     # desired radial spacing between concentric ring lanes
+RING_MIN_INNER_M  = 45.0     # smallest inner radius kept when shrinking
+MIN_LANE_GAP_M    = 30.0     # smallest lane spacing kept before dropping a lane
+HARD_MIN_OUTER_M  = 22.0     # absolute floor on outer radius
+
+# No-overlap constraints ----------------------------------------------
+# Rings may not cover obstacles/no-fly cells and may not overlap each other;
+# diameters (then lane counts) are reduced to satisfy both. The centre may be
+# nudged up to CENTER_NUDGE_MAX_M toward free space to keep a usable size.
+AVOID_RA            = True    # treat no-fly (RA) cells as blocked too, not just obstacles
+OBSTACLE_CLEARANCE_M = 40.0   # min gap from a ring to a blocked-cell CENTRE; >= half
+                              #   the 50 m grid cell (25 m) so the ring clears its footprint
+RING_RING_GAP_M      = 40.0   # min gap between two rings
+CENTER_NUDGE_MAX_M   = 150.0  # max centre shift toward free space (0 disables)
+
+# Ring style ----------------------------------------------------------
+# SINGLE_RING = one circulating lane (turbine roundabout): every leg connects to
+# the one ring and shortcuts between close legs are added (see below). Set False
+# to use the old multi-lane concentric model (MERGE_SEP_DEG/MAX_LANES/etc.).
+SINGLE_RING = True
+
+# Sub-connectors (bypass shortcuts) -----------------------------------
+# Between two angularly-CLOSE legs, add a bypass arc outside the ring so traffic
+# between them skips the circulating ring (turbine-roundabout style).
+SUBCONNECTOR_MAX_DEG = 45.0  # legs within this angular gap get a bypass connector
+SUBCONNECTOR_OFFSET_M = 35.0 # tap the legs this far OUTSIDE the ring (before it)
+SUBCONNECTOR_BULGE_M = 55.0  # how far the bypass bulges beyond the tap radius
+SUBCONNECTOR_COUPLE_M = 16.0 # half-separation of the bypass's two mirrored lanes
+
+# Multi-lane model knobs (used only when SINGLE_RING = False) ----------
+MERGE_SEP_DEG   = 45.0       # angular window that counts as "merging together"
+ROUTES_PER_LANE = 4          # entries one lane can absorb before adding a lane
+MAX_LANES       = 4          # cap on M
+LANE_OVERRIDES  = {}         # force lane count on a ring, keyed by member node
