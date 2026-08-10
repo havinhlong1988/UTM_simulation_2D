@@ -1546,6 +1546,167 @@ def clip_legs_to_rings(legs: pd.DataFrame, lanes: pd.DataFrame,
     return legs, lanes
 
 
+def _min_dist_point_polyline(c: np.ndarray, xy: np.ndarray) -> float:
+    """Shortest distance from point c to a polyline (segment-accurate, not just
+    to the vertices -- a coarse lane can graze a ring between two vertices)."""
+    if len(xy) < 2:
+        return float(np.min(np.hypot(xy[:, 0] - c[0], xy[:, 1] - c[1]))) if len(xy) else math.inf
+    a, b = xy[:-1], xy[1:]
+    ab = b - a
+    l2 = np.einsum("ij,ij->i", ab, ab)
+    l2 = np.where(l2 == 0.0, 1.0, l2)
+    t = np.clip(np.einsum("ij,ij->i", c - a, ab) / l2, 0.0, 1.0)
+    proj = a + t[:, None] * ab
+    return float(np.min(np.hypot(proj[:, 0] - c[0], proj[:, 1] - c[1])))
+
+
+def _lane_ring_gaps(lane_xy: dict, ends_of: dict, ring: dict, _half_sep: float = 0.0):
+    """For every (leg, ring) the leg does NOT connect to, the min gap between the
+    NEAR corridor lane centerline and the ring's outer lane centerline (radial
+    distance - R_out), measured segment-accurately. Yields
+    (leg_id, rbt_id, gap_m, near_radial_m)."""
+    for lid, ends in ends_of.items():
+        for rid, (c, r_out, _r_in) in ring.items():
+            if rid in ends:
+                continue                               # this leg connects to the ring
+            near = math.inf
+            for lane in ("A", "B"):
+                lxy = lane_xy.get((lid, lane))
+                if lxy is None or len(lxy) == 0:
+                    continue
+                near = min(near, _min_dist_point_polyline(c, lxy))
+            if math.isfinite(near):
+                yield lid, rid, near - r_out, near
+
+
+def separate_legs_from_ring_buffers(legs: pd.DataFrame, lanes: pd.DataFrame,
+                                    roundabouts: pd.DataFrame, nofly_tree,
+                                    params: dict[str, Any]):
+    """Keep every corridor's BUFFER clear of every ring's BUFFER.
+
+    ``remove_legs_through_rings`` only tests leg CENTERLINES, so a corridor
+    whose centerline clears a ring it does not connect to can still have one of
+    its +/-half_sep offset lanes (and that lane's buffer band) dip into the
+    ring's buffer. For each offending (leg, ring) pair this pass SHIFTS the
+    corridor outward around the ring: the two lanes are re-sampled and the
+    stretch that grazes the ring is pushed radially out onto two concentric arcs
+    -- the near lane onto ``R_out + RING_CORRIDOR_SEPARATION_M`` and the far lane
+    one full ``MIN_CENTERLINE_SEPARATION_M`` beyond it. This preserves the
+    lane-to-lane separation and the fixed leg endpoints, and leaves the rest of
+    the corridor (already cleared of obstacles) untouched. A leg whose ENDPOINT
+    node itself lies inside the ring buffer cannot be shifted and is reported as
+    blocked. Returns (legs, lanes, report_df)."""
+    if not bool(M6.pget(params, "RING_SEPARATION_ENABLE", True)) \
+            or not len(roundabouts) or not len(legs):
+        return legs, lanes, pd.DataFrame()
+
+    sep       = float(M6.pget(params, "RING_CORRIDOR_SEPARATION_M",
+                              M6.pget(params, "MIN_CENTERLINE_SEPARATION_M", 50.0)))
+    lane_sep  = float(M6.pget(params, "MIN_CENTERLINE_SEPARATION_M", 50.0))   # A<->B spacing
+    lane_gap  = float(M6.pget(params, "ROUNDABOUT_LANE_GAP_M", 50.0))
+    dens_step = float(M6.pget(params, "RING_DETOUR_SAMPLE_M", 15.0))
+    max_pass  = int(M6.pget(params, "RING_DETOUR_MAX_PASSES", 3))
+
+    # (centre, R_outer, R_inner) per ring -- corridors approach from OUTSIDE, so
+    # the OUTER ring lane is the binding one for the separation.
+    ring = {str(r["rbt_id"]): (np.array([r["center_x"], r["center_y"]], float),
+                               float(r["radius_m"]),
+                               max(0.3 * float(r["radius_m"]), float(r["radius_m"]) - lane_gap))
+            for _, r in roundabouts.iterrows()}
+
+    legs = legs.reset_index(drop=True).copy()
+    ends_of = {str(r["leg_id"]): (str(r["a_id"]), str(r["b_id"])) for _, r in legs.iterrows()}
+
+    lane_xy: dict = {}                                  # (leg_id, lane) -> polyline
+    if len(lanes):
+        for (lid, ln), g in lanes.groupby(["leg_id", "lane"]):
+            lane_xy[(str(lid), str(ln))] = g.sort_values("seq")[["x", "y"]].to_numpy(float)
+
+    # violations BEFORE: near lane centerline closer than R_out + sep to a ring
+    before = {(lid, rid): gap for lid, rid, gap, _ in
+              _lane_ring_gaps(lane_xy, ends_of, ring, 0.0) if gap < sep - 1.0}
+    if not before:
+        return legs, lanes, pd.DataFrame()
+
+    def clamp_out(arr: np.ndarray, c: np.ndarray, r_target: float) -> bool:
+        """Push INTERIOR vertices inside r_target radially out onto the r_target
+        circle (endpoints stay fixed). Returns True if anything moved."""
+        d = np.hypot(arr[:, 0] - c[0], arr[:, 1] - c[1])
+        moved = False
+        for k in range(1, len(arr) - 1):
+            if d[k] < r_target - 1e-6:
+                u = (arr[k] - c) / (d[k] if d[k] > 1e-9 else 1.0)
+                arr[k] = c + u * r_target
+                moved = True
+        return moved
+
+    blocked: set = set()
+    changed_legs: set = set()
+    for _ in range(max(1, max_pass)):
+        changed = False
+        for lid in {l for (l, _r) in before}:
+            ends = ends_of[lid]
+            A, B = lane_xy.get((lid, "A")), lane_xy.get((lid, "B"))
+            if A is None or B is None or len(A) < 2 or len(B) < 2:
+                continue
+            Af = M6._resample_polyline_m(A, dens_step)   # interior vertices to bend
+            Bf = M6._resample_polyline_m(B, dens_step)
+            moved = False
+            for rid, (c, r_out, _r_in) in ring.items():
+                if rid in ends:
+                    continue
+                dA = np.hypot(Af[:, 0] - c[0], Af[:, 1] - c[1])
+                dB = np.hypot(Bf[:, 0] - c[0], Bf[:, 1] - c[1])
+                # near lane -> R_out+sep, far lane one lane_sep beyond, so the two
+                # stay lane_sep apart on concentric arcs and both clear the ring.
+                inner, dI, outer, dO = ((Af, dA, Bf, dB) if dA.min() <= dB.min()
+                                        else (Bf, dB, Af, dA))
+                r_in_t, r_out_t = r_out + sep, r_out + sep + lane_sep
+                if dI.min() >= r_in_t - 1e-6 and dO.min() >= r_out_t - 1e-6:
+                    continue                              # this ring already clear
+                # an endpoint node sitting inside the buffer cannot be shifted
+                if dI[0] < r_in_t or dI[-1] < r_in_t or dO[0] < r_out_t or dO[-1] < r_out_t:
+                    blocked.add((lid, rid))
+                moved |= clamp_out(inner, c, r_in_t)
+                moved |= clamp_out(outer, c, r_out_t)
+            if moved:
+                lane_xy[(lid, "A")], lane_xy[(lid, "B")] = Af, Bf
+                idx = legs.index[legs["leg_id"].astype(str) == lid]
+                if len(idx):
+                    la = float(np.hypot(np.diff(Af[:, 0]), np.diff(Af[:, 1])).sum())
+                    lb = float(np.hypot(np.diff(Bf[:, 0]), np.diff(Bf[:, 1])).sum())
+                    legs.at[idx[0], "length_m"] = 0.5 * (la + lb)
+                changed_legs.add(lid)
+                changed = True
+        if not changed:
+            break
+
+    # rebuild only the changed legs' rows in the lanes table
+    if changed_legs and len(lanes):
+        keep = lanes[~lanes["leg_id"].astype(str).isin(changed_legs)]
+        rows = []
+        for lid in changed_legs:
+            for ln in ("A", "B"):
+                for seq, (x, y) in enumerate(lane_xy[(lid, ln)]):
+                    rows.append({"leg_id": lid, "lane": ln, "seq": int(seq),
+                                 "x": float(x), "y": float(y)})
+        lanes = pd.concat([keep, pd.DataFrame(rows)], ignore_index=True)
+
+    after = {(lid, rid): gap for lid, rid, gap, _ in
+             _lane_ring_gaps(lane_xy, ends_of, ring, 0.0)}
+    report_rows = []
+    for (lid, rid), gap0 in sorted(before.items(), key=lambda kv: kv[1]):
+        gap1 = after.get((lid, rid), gap0)
+        report_rows.append({
+            "leg_id": lid, "ring": rid,
+            "gap_before_m": round(gap0, 1), "gap_after_m": round(gap1, 1),
+            "required_m": round(sep, 1),
+            "resolved": bool(gap1 >= sep - 1.0),
+            "method": ("endpoint_blocked" if (lid, rid) in blocked else "shifted"),
+        })
+    return legs, lanes, pd.DataFrame(report_rows)
+
+
 # ======================================================================
 # Main
 # ======================================================================
@@ -1650,6 +1811,23 @@ def main() -> None:
             print(f"  drop {len(dropped)} leg(s) crossing a ring disk (route through it): "
                   f"{', '.join(sorted(dropped))}")
         legs, lanes = clip_legs_to_rings(legs, lanes, roundabouts, params)
+        # Corridor <-> ring buffer separation: bend legs whose lane buffer dips
+        # into a ring buffer they do not connect to, back out to the required
+        # separation (endpoints + lane-to-lane separation preserved).
+        legs, lanes, ring_sep = separate_legs_from_ring_buffers(
+            legs, lanes, roundabouts, nofly_tree, params)
+        if len(ring_sep):
+            ring_sep.to_csv(output_dir / "ring_corridor_separation.csv", index=False)
+            n_fixed = int(ring_sep["resolved"].sum())
+            n_blocked = int((ring_sep["method"] == "endpoint_blocked").sum())
+            print(f"Ring separation : {len(ring_sep)} corridor/ring buffer conflicts "
+                  f"({n_fixed} shifted clear"
+                  f"{f', {n_blocked} endpoint-blocked' if n_blocked else ''}) "
+                  f"-> ring_corridor_separation.csv")
+            for _, r in ring_sep[~ring_sep["resolved"]].iterrows():
+                print(f"  UNRESOLVED {r['leg_id']} vs {r['ring']}: "
+                      f"gap {r['gap_before_m']:.0f}->{r['gap_after_m']:.0f} m "
+                      f"(need {r['required_m']:.0f}; {r['method']})")
         for _, r in roundabouts.iterrows():
             print(f"  {r['rbt_id']}: R={r['radius_m']:.0f} m  <- {r['members']}")
 
