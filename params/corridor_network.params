@@ -173,13 +173,17 @@ ROUNDABOUT_MAX_RADIUS_M      = 450.0   # largest ring radius
 # density cap and squeezes the RBT03<->RBT04 corridor, so cap it to 370 m
 # (still encircles its members, spread ~= 364 m, and clears the corridor).
 ROUNDABOUT_RADIUS_OVERRIDES  = {"MAJ013": 370.0, "MIN005": 145.0}
-# Manual lateral shift of a specific leg's corridor, keyed by leg_id. Value is
-# the max sideways BOW in metres toward +x (east / right on the map); the leg is
-# bowed out in the middle and tapered back to its fixed endpoints, preserving the
-# A<->B lane separation, and never bowed into an obstacle. Use to pull a corridor
-# off a neighbour it runs too close to, e.g. DB02->MIN016 bundles with
-# MIN016->RBT07, so bow it 60 m east into the open space.
-LEG_LATERAL_SHIFTS           = {"DB02__MIN016": 60.0}
+# Manual lateral shift of a specific leg's corridor, keyed by leg_id. The value
+# is either a bare magnitude in metres (bows toward +x / east; negative = west)
+# or a (magnitude, direction) pair where direction is "up"/"down"/"north"/
+# "south"/"east"/"west" (or a (dx,dy) vector) -- the leg is bowed along the
+# perpendicular nearest that direction, tapered back to its fixed endpoints,
+# lanes held 50 m apart, and never bowed into an obstacle. Use to pull a corridor
+# off a neighbour it runs too close to:
+#   DB02->MIN016 bundles with MIN016->RBT07 -> bow 60 m east into open space;
+#   RBT05->RBT08 (the RBT03->RBT05 route) bundles with DB01->RBT05 below it,
+#   with room above -> bow 45 m up.
+LEG_LATERAL_SHIFTS           = {"DB02__MIN016": 60.0, "RBT05__RBT08": (45.0, "up")}
 ROUNDABOUT_MEMBER_MARGIN_M   = 40.0    # ring encircles members + this margin
 # Ring size scales with TRAFFIC DENSITY: radius += GAIN * (entering legs), so
 # busier junctions get a bigger roundabout.

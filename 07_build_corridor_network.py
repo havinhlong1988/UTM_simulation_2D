@@ -1770,9 +1770,24 @@ def apply_leg_lateral_shifts(legs: pd.DataFrame, lanes: pd.DataFrame, nofly_tree
         s = np.linspace(0.0, L[-1], n)
         return np.column_stack([np.interp(s, L, xy[:, 0]), np.interp(s, L, xy[:, 1])])
 
+    _DIRS = {"east": (1., 0.), "right": (1., 0.), "west": (-1., 0.), "left": (-1., 0.),
+             "north": (0., 1.), "up": (0., 1.), "south": (0., -1.), "down": (0., -1.)}
     applied, changed = [], set()
-    for lid, off in shifts.items():
-        lid = str(lid); off = float(off)
+    for lid, spec in shifts.items():
+        lid = str(lid)
+        # spec is a bare magnitude (toward +x, sign flips it) OR a (magnitude,
+        # direction) pair where direction is "up"/"down"/"east"/"west"/... or a
+        # (dx, dy) vector -- the leg is bowed along the perpendicular nearest that
+        # direction.
+        if isinstance(spec, (list, tuple)) and len(spec) == 2:
+            off = float(spec[0])
+            ds = spec[1]
+            refdir = np.array(_DIRS.get(str(ds).lower(), (1., 0.))
+                              if isinstance(ds, str) else ds, float)
+        else:
+            off = float(spec); refdir = np.array([1., 0.])
+        if off < 0:
+            refdir, off = -refdir, -off
         A0, B0 = lane_xy.get((lid, "A")), lane_xy.get((lid, "B"))
         if A0 is None or len(A0) < 2:
             continue
@@ -1788,8 +1803,8 @@ def apply_leg_lateral_shifts(legs: pd.DataFrame, lanes: pd.DataFrame, nofly_tree
         d = mid[-1] - mid[0]
         clen = float(np.hypot(*d)) or 1.0
         u = d / clen
-        en = np.array([-u[1], u[0]])
-        en = en if en[0] >= 0 else -en                  # unit normal pointing +x (east)
+        p = np.array([-u[1], u[0]])                      # leg perpendicular
+        en = p if float(p @ refdir) >= 0 else -p         # ... on the requested side
         t = np.clip(((mid - mid[0]) @ u) / clen, 0.0, 1.0)
         taper = np.clip(np.minimum(t / ramp, (1.0 - t) / ramp), 0.0, 1.0)
         disp = (off * taper)[:, None] * en
@@ -1823,7 +1838,9 @@ def apply_leg_lateral_shifts(legs: pd.DataFrame, lanes: pd.DataFrame, nofly_tree
             lane_xy[(lid, "A")] = A1 + disp
             if B1 is not None:
                 lane_xy[(lid, "B")] = B1 + disp
-        changed.add(lid); applied.append((lid, off))
+        lbl = (("east" if en[0] > 0 else "west") if abs(en[0]) >= abs(en[1])
+               else ("north" if en[1] > 0 else "south"))
+        changed.add(lid); applied.append((lid, off, lbl))
 
     if changed:
         keep = lanes[~lanes["leg_id"].astype(str).isin(changed)]
@@ -1965,8 +1982,8 @@ def main() -> None:
         # Manual per-leg lateral bow (LEG_LATERAL_SHIFTS) to pull a corridor off
         # a neighbour it runs too close to.
         legs, lanes, lat = apply_leg_lateral_shifts(legs, lanes, nofly_tree, params)
-        for lid, off in lat:
-            print(f"Lateral shift   : {lid} bowed {off:+.0f} m east into open space")
+        for lid, off, lbl in lat:
+            print(f"Lateral shift   : {lid} bowed {off:.0f} m {lbl} into open space")
         for _, r in roundabouts.iterrows():
             print(f"  {r['rbt_id']}: R={r['radius_m']:.0f} m  <- {r['members']}")
 
