@@ -82,10 +82,13 @@ def parse_args() -> argparse.Namespace:
 
 
 def corridor_mask(lanes: pd.DataFrame, xc: np.ndarray, yc: np.ndarray,
-                  half_width: float) -> np.ndarray:
+                  half_width: float, rings: pd.DataFrame | None = None) -> np.ndarray:
     """Boolean grid[ny,nx]: True where a cell centre lies within `half_width`
-    metres of any lane centreline. Lane polylines are densely resampled so a
-    nearest-point KD-tree query approximates the true distance-to-polyline."""
+    metres of any lane centreline OR of a roundabout ring. Lane polylines are
+    densely resampled so a nearest-point KD-tree query approximates the true
+    distance-to-polyline; the ROUNDABOUT circulating corridors are added as an
+    annular band |dist_to_centre - radius| <= half_width (the leg lanes stop AT
+    the ring boundary, so without this the ring interiors read as off-corridor)."""
     step = max(2.0, half_width / 3.0)
     pts = []
     for (leg_id, lane), g in lanes.groupby(["leg_id", "lane"]):
@@ -106,11 +109,16 @@ def corridor_mask(lanes: pd.DataFrame, xc: np.ndarray, yc: np.ndarray,
     gx, gy = np.meshgrid(xc, yc)                       # [ny,nx]
     grid_pts = np.column_stack([gx.ravel(), gy.ravel()])
     dist, _ = tree.query(grid_pts, k=1)
-    return (dist <= half_width).reshape(gx.shape)
+    inside = (dist <= half_width).reshape(gx.shape)
+    if rings is not None and len(rings):              # add the ring circulating bands
+        for r in rings.itertuples():
+            dcen = np.hypot(gx - float(r.center_x), gy - float(r.center_y))
+            inside |= np.abs(dcen - float(r.radius_m)) <= half_width
+    return inside
 
 
 def draw_network(ax, corridor_dir: Path):
-    """Light overlay of lane centrelines + objectives, for context."""
+    """Light overlay of lane centrelines + roundabout rings + objectives."""
     lanes = pd.read_csv(corridor_dir / "lane_nodes.csv")
     for leg_id in lanes["leg_id"].unique():
         for lane in ("A", "B"):
@@ -118,6 +126,12 @@ def draw_network(ax, corridor_dir: Path):
             xy = g[["x", "y"]].to_numpy(float)
             if len(xy) >= 2:
                 ax.plot(xy[:, 0], xy[:, 1], "-", color="0.5", lw=0.6, alpha=0.7, zorder=5)
+    ring_file = corridor_dir / "roundabouts.csv"
+    if ring_file.exists():
+        from matplotlib.patches import Circle
+        for r in pd.read_csv(ring_file).itertuples():
+            ax.add_patch(Circle((float(r.center_x), float(r.center_y)), float(r.radius_m),
+                                 fill=False, ec="0.5", lw=0.6, alpha=0.7, zorder=5))
     nodes = pd.read_csv(corridor_dir / "network_nodes.csv")
     obj = nodes[nodes["kind"] == "objective"]
     for r in obj.itertuples():
@@ -176,14 +190,17 @@ def main() -> None:
 
     # ---- confine to corridors: keep density slowness INSIDE, crawl OUTSIDE ----
     lanes = pd.read_csv(corridor_dir / "lane_nodes.csv")
+    ring_file = corridor_dir / "roundabouts.csv"
+    rings = pd.read_csv(ring_file) if ring_file.exists() else None
     xc = x0 + args.res * (np.arange(nx) + 0.5)
     yc = y0 + args.res * (np.arange(ny) + 0.5)
-    inside = corridor_mask(lanes, xc, yc, args.corridor_half_width)   # [ny,nx]
+    inside = corridor_mask(lanes, xc, yc, args.corridor_half_width, rings)   # [ny,nx]
     slowness = np.where(inside, slowness, args.outside_slowness)
     frac_in = float(inside.mean())
     print(f"Corridor mask : half-width {args.corridor_half_width:.0f} m, "
-          f"{frac_in*100:.1f}% of cells inside; outside slowness "
-          f"{args.outside_slowness:.2f}")
+          f"{frac_in*100:.1f}% of cells inside "
+          f"({0 if rings is None else len(rings)} roundabout rings included); "
+          f"outside slowness {args.outside_slowness:.2f}")
 
     np.savez(out_dir / "slowness_costmap.npz",
              slowness=slowness.astype(np.float32),
