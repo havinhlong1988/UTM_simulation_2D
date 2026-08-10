@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-09_generate_costmap.py
+08_generate_costmap.py
 
 Auto-generate a SLOWNESS cost-map from the traffic density produced by the
-agent simulation (10_simulate_agents_2d.py). The map is INDEPENDENT of the
+agent simulation (09_simulate_agents_2d.py). The map is INDEPENDENT of the
 routes -- it does not change where agents fly, only how fast they go:
 
     true velocity = slowness(x, y) * base drone velocity
@@ -24,17 +24,17 @@ map. The corridors themselves are unaffected.
 
 Pipeline
 --------
-    10_simulate_agents_2d.py   (run once, base speeds)  -> traffic samples
-    09_generate_costmap.py     (this)                   -> slowness cost-map
-    10_simulate_agents_2d.py   (re-run)                 -> speeds modulated
+    09_simulate_agents_2d.py   (run once, base speeds)  -> traffic samples
+    08_generate_costmap.py     (this)                   -> slowness cost-map
+    09_simulate_agents_2d.py   (re-run)                 -> speeds modulated
 
 Run
 ---
-    python 09_generate_costmap.py
-    python 09_generate_costmap.py --traffic output/10_agent_sim_2d/trajectories.csv \\
+    python 08_generate_costmap.py
+    python 08_generate_costmap.py --traffic output/09_agent_sim_2d/trajectories.csv \\
         --res 40 --sigma 150 --min-slowness 0.01 --corridor-half-width 60
 
-Outputs (output/09_costmap/)
+Outputs (output/08_costmap/)
 ----------------------------
     slowness_costmap.npz   grid: slowness[ny,nx], x0, y0, res
     slowness_costmap.png   the field with the corridor network overlaid
@@ -62,10 +62,10 @@ VERSION = "v1"
 
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description="Traffic-density slowness cost-map.")
-    p.add_argument("--traffic", default="output/10_agent_sim_2d/trajectories.csv",
+    p.add_argument("--traffic", default="output/09_agent_sim_2d/trajectories.csv",
                    help="agent position samples (t_s,agent_id,x,y,...) from the sim")
     p.add_argument("--corridor-dir", default="output/07_corridor_network")
-    p.add_argument("--out-dir", default="output/09_costmap")
+    p.add_argument("--out-dir", default="output/08_costmap")
     p.add_argument("--res", type=float, default=40.0, help="grid cell size (m)")
     p.add_argument("--sigma", type=float, default=150.0, help="Gaussian smoothing sigma (m)")
     p.add_argument("--min-slowness", type=float, default=1e-2)
@@ -136,7 +136,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
-    print(f"09_generate_costmap.py  {VERSION}")
+    print(f"08_generate_costmap.py  {VERSION}")
     print(f"Traffic       : {args.traffic}")
     print(f"Output dir    : {out_dir}")
     print("=" * 66)

@@ -1,5 +1,5 @@
 # ======================================================================
-# Multi-agent 2D corridor traffic simulation (10_simulate_agents_2d.py)
+# Multi-agent 2D corridor traffic simulation (09_simulate_agents_2d.py)
 # ======================================================================
 # A fleet of UAV agents flies missions between the DB (depot) and DK
 # (delivery) objectives on the two-lane corridor network from step 07,
@@ -18,10 +18,10 @@
 
 # Input / output ------------------------------------------------------
 CORRIDOR_DIR = "output/07_corridor_network"
-OUTPUT_DIR   = "output/10_agent_sim_2d"
-# Slowness cost-map from 09_generate_costmap.py (true velocity = slowness x
+OUTPUT_DIR   = "output/09_agent_sim_2d"
+# Slowness cost-map from 08_generate_costmap.py (true velocity = slowness x
 # base speed). If the file is absent, base speeds are used.
-COST_MAP_FILE = "output/09_costmap/slowness_costmap.npz"
+COST_MAP_FILE = "output/08_costmap/slowness_costmap.npz"
 # Planning-model .xyz grid from step 02 (has obstacle_flag / ra_flag); its
 # obstacles + no-fly (RA) cells are overlaid on 00_network_traffic.png. Absent
 # -> no overlay.
@@ -191,7 +191,7 @@ SAMPLE_EVERY_S   = 20.0       # record a timeline/animation frame this often (fi
 MAX_GIF_FRAMES   = 360        # subsample frames down to at most this many
 GIF_FPS          = 20
 MAKE_HTML        = True        # self-contained interactive 2D agents_animation.html
-# Per-agent route replays under output/10_agent_sim_2d/agent_route/ (one HTML per
+# Per-agent route replays under output/09_agent_sim_2d/agent_route/ (one HTML per
 # agent + index.html) to inspect each agent's travel. MAX = -1 -> all agents.
 MAKE_AGENT_ROUTE_HTML     = True
 AGENT_ROUTE_MAX           = -1

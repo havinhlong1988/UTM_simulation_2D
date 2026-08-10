@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-10_simulate_agents_2d.py
+09_simulate_agents_2d.py
 
 Multi-agent 2D corridor traffic simulation on the shared UAV network
 built by 07_build_corridor_network.py.
@@ -35,13 +35,13 @@ by every output.
 
 Run
 ---
-    python 10_simulate_agents_2d.py
-    python 10_simulate_agents_2d.py --param-file params/simulate_agents_2d.params
-    python 10_simulate_agents_2d.py --agents 60 --hours 4 --seed 7 --no-animation
+    python 09_simulate_agents_2d.py
+    python 09_simulate_agents_2d.py --param-file params/simulate_agents_2d.params
+    python 09_simulate_agents_2d.py --agents 60 --hours 4 --seed 7 --no-animation
 
 Explicit CLI flags override the params file.
 
-Outputs (output/10_agent_sim_2d/)
+Outputs (output/09_agent_sim_2d/)
 ---------------------------------
     agent_missions.csv    one row per mission (endpoints, timings, holds)
     sim_timeline.csv      per-sample airborne / holding counts, min sep
@@ -173,7 +173,7 @@ def interp_xy(xy: np.ndarray, cs: np.ndarray, s: float) -> np.ndarray:
 
 
 def load_costmap(path):
-    """Load the slowness cost-map produced by 09_generate_costmap.py.
+    """Load the slowness cost-map produced by 08_generate_costmap.py.
     Returns (grid[ny,nx], x0, y0, res, nx, ny) or None if absent."""
     p = THIS_DIR / str(path)
     if not p.exists():
@@ -584,7 +584,7 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     # slowness cost-map (from step 09): true velocity = slowness * base speed.
     # Routes are unaffected (fixed) -- the map only modulates travel speed.
     cost_map = load_costmap(pget(params, "COST_MAP_FILE",
-                                 "output/09_costmap/slowness_costmap.npz"))
+                                 "output/08_costmap/slowness_costmap.npz"))
     if cost_map is not None:
         cm_grid, cm_x0, cm_y0, cm_res, cm_nx, cm_ny = cost_map
 
@@ -1495,7 +1495,7 @@ def write_html(net: Network, frames, params, sep_eff, out_html: Path):
     # a flat row-major grid of slowness*1000 ints to keep the file compact.
     costmap = None
     cm_path = THIS_DIR / str(pget(params, "COST_MAP_FILE",
-                                  "output/09_costmap/slowness_costmap.npz"))
+                                  "output/08_costmap/slowness_costmap.npz"))
     if cm_path.exists():
         z = np.load(cm_path)
         g = z["slowness"].astype(float)
@@ -1874,7 +1874,7 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
 
     costmap = None
     cm_path = THIS_DIR / str(pget(params, "COST_MAP_FILE",
-                                  "output/09_costmap/slowness_costmap.npz"))
+                                  "output/08_costmap/slowness_costmap.npz"))
     if cm_path.exists():
         z = np.load(cm_path)
         g = z["slowness"].astype(float)
@@ -2409,13 +2409,13 @@ def main() -> None:
         params["MAX_CONCURRENT"] = args.concurrent
 
     corridor_dir = THIS_DIR / str(pget(params, "CORRIDOR_DIR", "output/07_corridor_network"))
-    output_dir = THIS_DIR / str(pget(params, "OUTPUT_DIR", "output/10_agent_sim_2d"))
+    output_dir = THIS_DIR / str(pget(params, "OUTPUT_DIR", "output/09_agent_sim_2d"))
     fig_dir = output_dir / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
-    print(f"10_simulate_agents_2d.py  {VERSION}")
+    print(f"09_simulate_agents_2d.py  {VERSION}")
     print(f"Param file    : {args.param_file}")
     print(f"Corridor dir  : {corridor_dir}")
     print(f"Output dir    : {output_dir}")
@@ -2491,7 +2491,7 @@ def main() -> None:
         print(f"Cost-map      : slowness field applied (min slowness "
               f"{stats['cost_map_min_slowness']:.2f}); true velocity = slowness x base speed")
     else:
-        print(f"Cost-map      : none (run 09_generate_costmap.py first); base speeds used")
+        print(f"Cost-map      : none (run 08_generate_costmap.py first); base speeds used")
     if stats["flow_mode"] != "spacing":
         print(f"Leg rule      : max agents on any one leg = {stats['max_agents_per_leg']} -> "
               f"{'OK (<=1)' if stats['max_agents_per_leg'] <= 1 else 'VIOLATION'}")

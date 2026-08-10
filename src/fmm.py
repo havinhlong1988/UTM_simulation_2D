@@ -4,7 +4,7 @@
 src/fmm.py -- Fast Marching Method (FMM) on a 2D cost grid.
 
 A dependency-free (numpy + heapq) first-order Eikonal solver used by
-11_fmm_route_plan.py.  Given a per-cell IMPEDANCE field ``cost`` (the
+10_fmm_route_plan.py.  Given a per-cell IMPEDANCE field ``cost`` (the
 "slowness" in the Eikonal sense -- higher = more expensive to cross) and a
 set of source cells, it computes the minimum accumulated cost T(x) from the
 nearest source to every cell.  Routes are then recovered by steepest descent

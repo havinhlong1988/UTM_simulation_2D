@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-11_fmm_route_plan.py
+10_fmm_route_plan.py
 
 Risk/conflict-aware route planning with the FAST MARCHING METHOD (FMM).
 
@@ -19,10 +19,10 @@ field.  No-fly cells (step 01) are obstacles.
 Inputs
 ------
     output/01_random_node_map/*.xyz     risk_total + slowness (no-fly) grid
-    output/09_costmap/slowness_costmap.npz   traffic-density slowness (step 09)
+    output/08_costmap/slowness_costmap.npz   traffic-density slowness (step 08)
     output/07_corridor_network/*         objectives + pair list (+ lanes overlay)
 
-Outputs (output/11_fmm_routes/)
+Outputs (output/10_fmm_routes/)
 -------------------------------
     fmm_routes.csv        pair, seq, x, y, risk, conflict per route point
     route_summary.csv     per-pair length / mean risk / mean conflict / cost
@@ -34,8 +34,8 @@ Outputs (output/11_fmm_routes/)
 
 Run
 ---
-    python 11_fmm_route_plan.py
-    python 11_fmm_route_plan.py --param-file params/fmm_route_plan.params \\
+    python 10_fmm_route_plan.py
+    python 10_fmm_route_plan.py --param-file params/fmm_route_plan.params \\
         --w-risk 3 --w-conflict 2 --pairs all
 """
 from __future__ import annotations
@@ -223,11 +223,11 @@ def main() -> None:
     make_fig = (not args.no_figures) and bool(pget(params, "MAKE_FIGURES", True))
 
     corridor_dir = THIS_DIR / str(pget(params, "CORRIDOR_DIR", "output/07_corridor_network"))
-    out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/11_fmm_routes"))
+    out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/10_fmm_routes"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
-    print(f"11_fmm_route_plan.py  {VERSION}")
+    print(f"10_fmm_route_plan.py  {VERSION}")
     print(f"Weights       : time={w_time}  risk={w_risk}  conflict={w_conf}")
     print(f"Pairs         : {pair_source}")
     print(f"Output dir    : {out_dir}")
@@ -375,7 +375,7 @@ def main() -> None:
                      "Risk term (step 01) + FMM routes", "risk (normalised)",
                      "Reds", out_dir / "risk_field.png")
         field_figure(np.where(passable, c_hat, np.nan), extent, routes_xy, obj_xy,
-                     "Conflict term (step 09 traffic) + FMM routes", "conflict (normalised)",
+                     "Conflict term (step 08 traffic) + FMM routes", "conflict (normalised)",
                      "Oranges", out_dir / "conflict_field.png")
         b0 = dests[0]
         Td = T_cache[b0]
