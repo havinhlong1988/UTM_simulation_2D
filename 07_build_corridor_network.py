@@ -1309,16 +1309,22 @@ def _clip_end_at_ring(xy: np.ndarray, center: np.ndarray, radius: float) -> np.n
 
 def _fit_ring(center: np.ndarray, radius: float, nofly_tree,
               ring_geo: list, obst_clr: float, ring_gap: float,
-              nudge_max: float, nudge_passes: int) -> tuple[np.ndarray, float]:
+              nudge_max: float, nudge_passes: int,
+              half_w: float = 0.0) -> tuple[np.ndarray, float]:
     """Fit a ring of the DESIRED radius by first NUDGING the centre away
     from the nearest obstacle / other rings (estimated from centre+radius),
-    only shrinking the radius as a last resort. Returns (centre, radius)."""
+    only shrinking the radius as a last resort. Returns (centre, radius).
+
+    The ring is a BUFFERED circular corridor (half_w each side), so the
+    obstacle clearance is applied to the OUTER BUFFER EDGE (radius + half_w),
+    not the centerline -- otherwise the buffer band falls into the no-fly
+    cell it is nominally `obst_clr` away from."""
     center = np.asarray(center, float).copy()
     for _ in range(max(1, nudge_passes)):
         moved = False
         if nofly_tree is not None:                      # push off the nearest no-fly cell
             d, idx = nofly_tree.query(center, k=1)
-            need = radius + obst_clr - float(d)
+            need = radius + half_w + obst_clr - float(d)
             if need > 1.0:
                 obs = np.asarray(nofly_tree.data[int(idx)], float)
                 v = center - obs
@@ -1334,10 +1340,10 @@ def _fit_ring(center: np.ndarray, radius: float, nofly_tree,
                 moved = True
         if not moved:
             break
-    # whatever overlap survives the nudging is removed by shrinking
+    # whatever overlap survives the nudging is removed by shrinking (buffer edge)
     if nofly_tree is not None:
         d, _ = nofly_tree.query(center, k=1)
-        radius = min(radius, float(d) - obst_clr)
+        radius = min(radius, float(d) - obst_clr - half_w)
     for (_id, oc, orad) in ring_geo:
         radius = min(radius, float(np.hypot(*(center - oc))) - orad - ring_gap)
     return center, radius
@@ -1428,7 +1434,7 @@ def build_roundabouts(nodes: pd.DataFrame, legs: pd.DataFrame, nofly_tree,
         desired = min(max_rad, max(min_rad, spread + margin - half_w) + dens_gain * entries)
         # fit by NUDGING the centre off obstacles/rings first, shrink only if needed
         center, radius = _fit_ring(center, desired, nofly_tree, ring_geo,
-                                   obst_clr, ring_gap, nudge_max, nudge_n)
+                                   obst_clr, ring_gap, nudge_max, nudge_n, half_w)
         if radius + half_w < 0.9 * spread or radius < 0.5 * min_rad:
             continue                                        # no room -> leave point nodes
         rid += 1
@@ -1603,6 +1609,7 @@ def separate_legs_from_ring_buffers(legs: pd.DataFrame, lanes: pd.DataFrame,
     sep       = float(M6.pget(params, "RING_CORRIDOR_SEPARATION_M",
                               M6.pget(params, "MIN_CENTERLINE_SEPARATION_M", 50.0)))
     lane_sep  = float(M6.pget(params, "MIN_CENTERLINE_SEPARATION_M", 50.0))   # A<->B spacing
+    half_w    = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))     # lane buffer
     lane_gap  = float(M6.pget(params, "ROUNDABOUT_LANE_GAP_M", 50.0))
     dens_step = float(M6.pget(params, "RING_DETOUR_SAMPLE_M", 15.0))
     max_pass  = int(M6.pget(params, "RING_DETOUR_MAX_PASSES", 3))
@@ -1630,7 +1637,8 @@ def separate_legs_from_ring_buffers(legs: pd.DataFrame, lanes: pd.DataFrame,
 
     def clamp_out(arr: np.ndarray, c: np.ndarray, r_target: float) -> bool:
         """Push INTERIOR vertices inside r_target radially out onto the r_target
-        circle (endpoints stay fixed). Returns True if anything moved."""
+        circle (endpoints stay fixed). Returns True if anything moved. Obstacle
+        clearance is enforced by the caller (revert-on-violation)."""
         d = np.hypot(arr[:, 0] - c[0], arr[:, 1] - c[1])
         moved = False
         for k in range(1, len(arr) - 1):
@@ -1641,6 +1649,7 @@ def separate_legs_from_ring_buffers(legs: pd.DataFrame, lanes: pd.DataFrame,
         return moved
 
     blocked: set = set()
+    obstacle_blocked: set = set()
     changed_legs: set = set()
     for _ in range(max(1, max_pass)):
         changed = False
@@ -1651,6 +1660,12 @@ def separate_legs_from_ring_buffers(legs: pd.DataFrame, lanes: pd.DataFrame,
                 continue
             Af = M6._resample_polyline_m(A, dens_step)   # interior vertices to bend
             Bf = M6._resample_polyline_m(B, dens_step)
+
+            def obs_clr(*arrs) -> float:                  # min lane clearance to a no-fly cell
+                if nofly_tree is None:
+                    return math.inf
+                return min(float(nofly_tree.query(a, k=1)[0].min()) for a in arrs)
+
             moved = False
             for rid, (c, r_out, _r_in) in ring.items():
                 if rid in ends:
@@ -1667,8 +1682,18 @@ def separate_legs_from_ring_buffers(legs: pd.DataFrame, lanes: pd.DataFrame,
                 # an endpoint node sitting inside the buffer cannot be shifted
                 if dI[0] < r_in_t or dI[-1] < r_in_t or dO[0] < r_out_t or dO[-1] < r_out_t:
                     blocked.add((lid, rid))
-                moved |= clamp_out(inner, c, r_in_t)
-                moved |= clamp_out(outer, c, r_out_t)
+                # try the shift, but OBSTACLE CLEARANCE WINS: if bending this leg
+                # around the ring would push a lane buffer into a no-fly cell (a
+                # corridor squeezed between the ring and an obstacle), revert this
+                # ring's shift and leave the leg on its obstacle-clear path.
+                snapA, snapB = Af.copy(), Bf.copy()
+                clr0 = obs_clr(Af, Bf)
+                mv = clamp_out(inner, c, r_in_t) | clamp_out(outer, c, r_out_t)
+                if mv and obs_clr(Af, Bf) < min(half_w, clr0) - 1.0:
+                    Af[:], Bf[:] = snapA, snapB           # undo -- would hit an obstacle
+                    obstacle_blocked.add((lid, rid))
+                    continue
+                moved |= mv
             if moved:
                 lane_xy[(lid, "A")], lane_xy[(lid, "B")] = Af, Bf
                 idx = legs.index[legs["leg_id"].astype(str) == lid]
@@ -1697,12 +1722,18 @@ def separate_legs_from_ring_buffers(legs: pd.DataFrame, lanes: pd.DataFrame,
     report_rows = []
     for (lid, rid), gap0 in sorted(before.items(), key=lambda kv: kv[1]):
         gap1 = after.get((lid, rid), gap0)
+        if (lid, rid) in blocked:
+            method = "endpoint_blocked"
+        elif (lid, rid) in obstacle_blocked:
+            method = "obstacle_blocked"
+        else:
+            method = "shifted"
         report_rows.append({
             "leg_id": lid, "ring": rid,
             "gap_before_m": round(gap0, 1), "gap_after_m": round(gap1, 1),
             "required_m": round(sep, 1),
             "resolved": bool(gap1 >= sep - 1.0),
-            "method": ("endpoint_blocked" if (lid, rid) in blocked else "shifted"),
+            "method": method,
         })
     return legs, lanes, pd.DataFrame(report_rows)
 
