@@ -1368,6 +1368,9 @@ def build_roundabouts(nodes: pd.DataFrame, legs: pd.DataFrame, nofly_tree,
     nudge_max = float(M6.pget(params, "ROUNDABOUT_NUDGE_MAX_M", 200.0))
     nudge_n   = int(M6.pget(params, "ROUNDABOUT_NUDGE_PASSES", 4))
     half_w    = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))  # ring is a buffered corridor
+    # per-ring RADIUS CAP, keyed by any member node label (stable across ring
+    # renumbering) -> shrink an over-large ring, e.g. {"MAJ013": 370.0}
+    rad_caps  = M6.pget(params, "ROUNDABOUT_RADIUS_OVERRIDES", {}) or {}
 
     # degree = number of incident legs per node ("multiple connect legs")
     deg = Counter()
@@ -1432,6 +1435,10 @@ def build_roundabouts(nodes: pd.DataFrame, legs: pd.DataFrame, nofly_tree,
         # the ring is a BUFFERED circular corridor (half_w each side), so members
         # within R_out + half_w are already covered -> the ring can be half_w smaller
         desired = min(max_rad, max(min_rad, spread + margin - half_w) + dens_gain * entries)
+        for m in members:                                   # per-ring radius cap
+            if m in rad_caps:
+                desired = min(desired, float(rad_caps[m]))
+                break
         # fit by NUDGING the centre off obstacles/rings first, shrink only if needed
         center, radius = _fit_ring(center, desired, nofly_tree, ring_geo,
                                    obst_clr, ring_gap, nudge_max, nudge_n, half_w)

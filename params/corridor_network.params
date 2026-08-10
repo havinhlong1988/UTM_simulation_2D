@@ -167,6 +167,12 @@ ROUNDABOUT_MIN_DEGREE        = 5       # min incident legs for a node to seed a 
 ROUNDABOUT_MERGE_RADIUS_M    = 320.0   # cluster/absorb nodes within this radius
 ROUNDABOUT_MIN_RADIUS_M      = 120.0   # smallest ring radius
 ROUNDABOUT_MAX_RADIUS_M      = 450.0   # largest ring radius
+# Per-ring radius CAP, keyed by any member node label (stable across ring
+# renumbering). Only ever shrinks a ring. Use to tame an over-large ring that
+# crowds nearby corridors -- e.g. RBT01 (MAJ013+MIN001+MIN002) hits the 450 m
+# density cap and squeezes the RBT03<->RBT04 corridor, so cap it to 370 m
+# (still encircles its members, spread ~= 364 m, and clears the corridor).
+ROUNDABOUT_RADIUS_OVERRIDES  = {"MAJ013": 370.0}
 ROUNDABOUT_MEMBER_MARGIN_M   = 40.0    # ring encircles members + this margin
 # Ring size scales with TRAFFIC DENSITY: radius += GAIN * (entering legs), so
 # busier junctions get a bigger roundabout.
