@@ -172,7 +172,14 @@ ROUNDABOUT_MAX_RADIUS_M      = 450.0   # largest ring radius
 # crowds nearby corridors -- e.g. RBT01 (MAJ013+MIN001+MIN002) hits the 450 m
 # density cap and squeezes the RBT03<->RBT04 corridor, so cap it to 370 m
 # (still encircles its members, spread ~= 364 m, and clears the corridor).
-ROUNDABOUT_RADIUS_OVERRIDES  = {"MAJ013": 370.0}
+ROUNDABOUT_RADIUS_OVERRIDES  = {"MAJ013": 370.0, "MIN005": 145.0}
+# Manual lateral shift of a specific leg's corridor, keyed by leg_id. Value is
+# the max sideways BOW in metres toward +x (east / right on the map); the leg is
+# bowed out in the middle and tapered back to its fixed endpoints, preserving the
+# A<->B lane separation, and never bowed into an obstacle. Use to pull a corridor
+# off a neighbour it runs too close to, e.g. DB02->MIN016 bundles with
+# MIN016->RBT07, so bow it 60 m east into the open space.
+LEG_LATERAL_SHIFTS           = {"DB02__MIN016": 60.0}
 ROUNDABOUT_MEMBER_MARGIN_M   = 40.0    # ring encircles members + this margin
 # Ring size scales with TRAFFIC DENSITY: radius += GAIN * (entering legs), so
 # busier junctions get a bigger roundabout.

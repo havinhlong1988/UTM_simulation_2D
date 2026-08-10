@@ -1745,6 +1745,102 @@ def separate_legs_from_ring_buffers(legs: pd.DataFrame, lanes: pd.DataFrame,
     return legs, lanes, pd.DataFrame(report_rows)
 
 
+def apply_leg_lateral_shifts(legs: pd.DataFrame, lanes: pd.DataFrame, nofly_tree,
+                             params: dict[str, Any]):
+    """Manual per-leg lateral BOW (LEG_LATERAL_SHIFTS = {leg_id: metres}). The
+    leg's corridor is bowed sideways toward +x (east; sign of the value flips it
+    west) by up to the given amount in the middle, tapered back to its fixed
+    endpoints so the leg still meets its nodes, with the A<->B lane separation
+    preserved. Used to pull a corridor off a neighbour it runs too close to. The
+    bow is never pushed into an obstacle (per-vertex clamped to keep half_w
+    clearance). Returns (legs, lanes, applied) where applied = [(leg_id, m)]."""
+    shifts = M6.pget(params, "LEG_LATERAL_SHIFTS", {}) or {}
+    if not shifts or not len(lanes):
+        return legs, lanes, []
+    half_w   = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))
+    dens     = float(M6.pget(params, "RING_DETOUR_SAMPLE_M", 15.0))
+    ramp     = 0.2                                       # taper fraction at each end
+    lane_xy  = {}
+    for (lid, ln), g in lanes.groupby(["leg_id", "lane"]):
+        lane_xy[(str(lid), str(ln))] = g.sort_values("seq")[["x", "y"]].to_numpy(float)
+
+    def rfrac(xy: np.ndarray, n: int) -> np.ndarray:     # resample to n points by arclength
+        seg = np.hypot(np.diff(xy[:, 0]), np.diff(xy[:, 1]))
+        L = np.concatenate([[0.0], np.cumsum(seg)])
+        s = np.linspace(0.0, L[-1], n)
+        return np.column_stack([np.interp(s, L, xy[:, 0]), np.interp(s, L, xy[:, 1])])
+
+    applied, changed = [], set()
+    for lid, off in shifts.items():
+        lid = str(lid); off = float(off)
+        A0, B0 = lane_xy.get((lid, "A")), lane_xy.get((lid, "B"))
+        if A0 is None or len(A0) < 2:
+            continue
+        # Re-sample both lanes to the SAME point count, take the centerline, and
+        # apply ONE shared displacement to both -> the A<->B separation is
+        # preserved exactly. The bow is a trapezoidal taper (0 at the fixed
+        # endpoints, full in the middle) along +x (east).
+        n = max(len(A0), (len(B0) if B0 is not None else 0),
+                int(np.hypot(*(A0[-1] - A0[0])) / dens) + 2)
+        A1 = rfrac(A0, n)
+        B1 = rfrac(B0, n) if (B0 is not None and len(B0) >= 2) else None
+        mid = A1 if B1 is None else 0.5 * (A1 + B1)
+        d = mid[-1] - mid[0]
+        clen = float(np.hypot(*d)) or 1.0
+        u = d / clen
+        en = np.array([-u[1], u[0]])
+        en = en if en[0] >= 0 else -en                  # unit normal pointing +x (east)
+        t = np.clip(((mid - mid[0]) @ u) / clen, 0.0, 1.0)
+        taper = np.clip(np.minimum(t / ramp, (1.0 - t) / ramp), 0.0, 1.0)
+        disp = (off * taper)[:, None] * en
+        lanes_k = [A1] + ([B1] if B1 is not None else [])
+        if nofly_tree is not None:                      # never bow a lane into an obstacle
+            for k in range(len(mid)):                   # shared fraction keeps A<->B intact
+                if any(float(nofly_tree.query(a[k] + disp[k], k=1)[0]) < half_w for a in lanes_k):
+                    lo, hi = 0.0, 1.0
+                    for _ in range(14):
+                        m = 0.5 * (lo + hi)
+                        if all(float(nofly_tree.query(a[k] + m * disp[k], k=1)[0]) >= half_w
+                               for a in lanes_k):
+                            lo = m
+                        else:
+                            hi = m
+                    disp[k] *= lo
+        # Regenerate the lanes as true PARALLEL offsets of the bowed centerline:
+        # a sheared displacement field compresses the inside of the bend, so
+        # rebuild them concentric to hold the full A<->B separation.
+        mid_bowed = mid + disp
+        half_sep = 0.5 * float(M6.pget(params, "MIN_CENTERLINE_SEPARATION_M", 50.0))
+        leftn = np.array([-u[1], u[0]])
+        sA = 1.0 if (B1 is None or float(((A1 - mid) @ leftn).mean()) >= 0) else -1.0
+        An = offset_polyline(mid_bowed, sA * half_sep)
+        Bn = offset_polyline(mid_bowed, -sA * half_sep) if B1 is not None else None
+        if An is not None and (B1 is None or Bn is not None):
+            lane_xy[(lid, "A")] = An
+            if Bn is not None:
+                lane_xy[(lid, "B")] = Bn
+        else:                                           # offset failed -> shared shift
+            lane_xy[(lid, "A")] = A1 + disp
+            if B1 is not None:
+                lane_xy[(lid, "B")] = B1 + disp
+        changed.add(lid); applied.append((lid, off))
+
+    if changed:
+        keep = lanes[~lanes["leg_id"].astype(str).isin(changed)]
+        rows = [{"leg_id": lid, "lane": ln, "seq": int(i), "x": float(x), "y": float(y)}
+                for (lid, ln), poly in lane_xy.items() if lid in changed
+                for i, (x, y) in enumerate(poly)]
+        lanes = pd.concat([keep, pd.DataFrame(rows)], ignore_index=True)
+        legs = legs.reset_index(drop=True).copy()
+        for lid in changed:
+            idx = legs.index[legs["leg_id"].astype(str) == lid]
+            if len(idx) and (lid, "A") in lane_xy and (lid, "B") in lane_xy:
+                la = float(np.hypot(*np.diff(lane_xy[(lid, "A")], axis=0).T).sum())
+                lb = float(np.hypot(*np.diff(lane_xy[(lid, "B")], axis=0).T).sum())
+                legs.at[idx[0], "length_m"] = 0.5 * (la + lb)
+    return legs, lanes, applied
+
+
 # ======================================================================
 # Main
 # ======================================================================
@@ -1866,6 +1962,11 @@ def main() -> None:
                 print(f"  UNRESOLVED {r['leg_id']} vs {r['ring']}: "
                       f"gap {r['gap_before_m']:.0f}->{r['gap_after_m']:.0f} m "
                       f"(need {r['required_m']:.0f}; {r['method']})")
+        # Manual per-leg lateral bow (LEG_LATERAL_SHIFTS) to pull a corridor off
+        # a neighbour it runs too close to.
+        legs, lanes, lat = apply_leg_lateral_shifts(legs, lanes, nofly_tree, params)
+        for lid, off in lat:
+            print(f"Lateral shift   : {lid} bowed {off:+.0f} m east into open space")
         for _, r in roundabouts.iterrows():
             print(f"  {r['rbt_id']}: R={r['radius_m']:.0f} m  <- {r['members']}")
 
