@@ -1284,11 +1284,17 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                 if len(conflict_pts_all) < 200000:
                     conflict_pts_all.extend(conflict_pts.tolist())
             # per-lane occupancy (deliveries): peak count and min along-track
-            # gap between successive agents on the same lane
+            # gap between successive agents on the same lane. Use GLOBAL progress
+            # (s_local + s_offset) so occupants of a shared ring lane -- each on
+            # its own arc that starts at s_local=0 at ITS entry angle -- are
+            # compared on one common coordinate, mirroring the move-loop spacing;
+            # without s_offset two agents far apart on the ring falsely read a 0 m
+            # gap. s_offset is 0 for ordinary legs, so their metric is unchanged.
             lane_s: dict = defaultdict(list)
             for a in air:
                 if not a.is_patrol:
-                    lane_s[a.cur_seg().res].append(a.s_local)
+                    seg = a.cur_seg()
+                    lane_s[seg.res].append(a.s_local + seg.s_offset)
             for ss in lane_s.values():
                 max_agents_per_leg = max(max_agents_per_leg, len(ss))
                 if len(ss) >= 2:
