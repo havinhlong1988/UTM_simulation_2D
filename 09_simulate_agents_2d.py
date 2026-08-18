@@ -132,6 +132,23 @@ def _resample_n(xy: np.ndarray, n: int = 60) -> np.ndarray:
     return np.column_stack([np.interp(t, s, xy[:, 0]), np.interp(t, s, xy[:, 1])])
 
 
+def travel_color_lane(lanes: pd.DataFrame, leg_id: str, forward: bool) -> tuple[str, np.ndarray]:
+    """Direction-coded lane: FORWARD rides the RED lane A, BACKWARD rides the
+    BLUE lane B (07 draws A red, B blue; on a roundabout A meets the outer ring,
+    B the inner ring). The stored lanes are oriented a->b, so backward is B
+    reversed. The two directions use different physical lanes -> spatial
+    deconfliction, same as travel_right_lane but colour-explicit."""
+    xy_a = _lane_xy(lanes, leg_id, "A")
+    xy_b = _lane_xy(lanes, leg_id, "B")
+    if forward:
+        if len(xy_a) >= 2:
+            return "A", xy_a
+        return "B", xy_b
+    if len(xy_b) >= 2:
+        return "B", xy_b[::-1]
+    return "A", xy_a[::-1] if len(xy_a) else xy_a
+
+
 def travel_right_lane(lanes: pd.DataFrame, leg_id: str, forward: bool) -> tuple[str, np.ndarray]:
     """Physical label and travel-oriented polyline of the lane on the
     RIGHT of the travel direction. The right/left side is decided
@@ -191,24 +208,51 @@ class LegSeg:
     """Read-only travel-oriented geometry of one directed leg-lane.
     Shared by every agent that rides it (state lives on the agent).
     src_node/dst_node are the network nodes this lane leaves / arrives at,
-    used for node-level (junction) deconfliction."""
-    __slots__ = ("res", "xy", "cs", "length", "src_node", "dst_node")
+    used for node-level (junction) deconfliction.
 
-    def __init__(self, res: str, xy: np.ndarray, src_node: str, dst_node: str):
+    s_offset makes the along-lane spacing coordinate GLOBAL: for a shared ring
+    lane every agent enters at a different angle, so its private arc `s_local`
+    is not comparable to another's. s_offset is the ring-lane arc position of
+    this seg's start (measured in the lane's circulation direction from a fixed
+    reference), so `s_local + s_offset` is a common progress coordinate for all
+    agents on the same ring resource. Straight legs use s_offset = 0."""
+    __slots__ = ("res", "xy", "cs", "length", "src_node", "dst_node", "s_offset")
+
+    def __init__(self, res: str, xy: np.ndarray, src_node: str, dst_node: str,
+                 s_offset: float = 0.0):
         self.res = res
         self.xy = xy
         self.cs = polyline_cumlen(xy)
         self.length = float(self.cs[-1])
         self.src_node = src_node
         self.dst_node = dst_node
+        self.s_offset = float(s_offset)
 
 
 class Network:
-    def __init__(self, corridor_dir: Path):
+    def __init__(self, corridor_dir: Path, ring_travel: bool = False,
+                 lane_gap: float = 50.0, ring_right_hand: bool = True):
         self.nodes = pd.read_csv(corridor_dir / "network_nodes.csv")
         self.lanes = pd.read_csv(corridor_dir / "lane_nodes.csv")
         self.legs = pd.read_csv(corridor_dir / "network_legs.csv")
         self.pair_routes = pd.read_csv(corridor_dir / "pair_routes.csv")
+
+        # roundabout ring geometry -> ring circulation between entry legs.
+        # A route that passes THROUGH a ring node gets a RING ARC seg spliced
+        # in (see route_segs / ring_seg): agents circulate on the outer RED
+        # ring (forward, CCW) or inner BLUE ring (backward, CW) rather than
+        # jumping across the ring centre.
+        self.ring_travel = bool(ring_travel)
+        self.ring_right_hand = bool(ring_right_hand)  # one-way CCW circulation
+        self._ring_ctr = 0                    # unique-id source for ring-arc segs
+        self.rings: dict[str, tuple[np.ndarray, float, float]] = {}
+        rf = corridor_dir / "roundabouts.csv"
+        if rf.exists():
+            for r in pd.read_csv(rf).itertuples():
+                c = np.array([float(r.center_x), float(r.center_y)], float)
+                r_out = float(r.radius_m)
+                r_in = max(0.3 * r_out, r_out - lane_gap)   # mirrors 07/08
+                self.rings[str(r.rbt_id)] = (c, r_out, r_in)
 
         obj = self.nodes[self.nodes["kind"] == "objective"]
         self.obj_xy = {r.net_id: np.array([r.x, r.y], float) for r in obj.itertuples()}
@@ -258,7 +302,8 @@ class Network:
         key = (leg_id, forward)
         seg = self._seg_cache.get(key)
         if seg is None:
-            label, xy = travel_right_lane(self.lanes, leg_id, forward)
+            pick = travel_color_lane if self.ring_travel else travel_right_lane
+            label, xy = pick(self.lanes, leg_id, forward)
             res = f"{leg_id}#{label}"
             a, b = self._leg_ends[leg_id]        # (net_a, net_b)
             src, dst = (a, b) if forward else (b, a)
@@ -316,6 +361,87 @@ class Network:
 
     def pairs_to_segs(self, pairs) -> list[LegSeg]:
         return [self.leg_seg(lg, d) for lg, d in pairs]
+
+    def nodes_of(self, pairs) -> list[str]:
+        """Network-node sequence [src0, dst0, dst1, ...] visited by a directed
+        leg path, reconstructed from the leg endpoints (dst_i == src_{i+1})."""
+        seq: list[str] = []
+        for lg, fwd in pairs:
+            a, b = self._leg_ends[lg]
+            s, d = (a, b) if fwd else (b, a)
+            if not seq:
+                seq.append(s)
+            seq.append(d)
+        return seq
+
+    def ring_seg(self, rbt: str, p_in: np.ndarray, p_out: np.ndarray,
+                 forward: bool = True, step_deg: float = 6.0) -> LegSeg | None:
+        """Circulating RING ARC across roundabout `rbt`, from entry point p_in
+        to exit point p_out.
+
+        RIGHT-HAND TRAFFIC (`ring_right_hand`, default): every agent circulates
+        COUNTER-CLOCKWISE (a right-hand-traffic roundabout is one-way CCW), so no
+        agent ever takes a clockwise short-cut across the ring the "wrong way".
+        The two ring lanes stay co-directional: forward travel rides the outer
+        RED ring, backward travel the inner BLUE ring, but BOTH go CCW. This can
+        add up to a full extra turn versus the shorter arc -- that is the price of
+        a consistent, head-on-free circulation.
+
+        LEGACY (`ring_right_hand` off): the SHORTER way round is taken --
+        counter-clockwise rides the outer RED ring, clockwise the inner BLUE ring.
+
+        Endpoints are stitched on so the arc is continuous with the entry/exit
+        legs. Returns None when entry and exit coincide."""
+        c, r_out, r_in = self.rings[rbt]
+        th_in = math.atan2(float(p_in[1] - c[1]), float(p_in[0] - c[0]))
+        th_out = math.atan2(float(p_out[1] - c[1]), float(p_out[0] - c[0]))
+        d_ccw = (th_out - th_in) % (2.0 * math.pi)
+        if d_ccw < 1e-2 or (2.0 * math.pi - d_ccw) < 1e-2:
+            return None
+        # ONE shared resource per (roundabout, ring lane): RINGA = outer red,
+        # RINGB = inner blue. Each lane is a fixed one-way circle, so every
+        # agent's along-lane progress is comparable via s_offset (arc position of
+        # the entry angle in the circulation direction) -> real headway spacing on
+        # the ring, no phantom leaders. `rbt#` prefix keeps conflict-grouping by
+        # roundabout (res.split('#')[0]).
+        two_pi = 2.0 * math.pi
+        if self.ring_right_hand:
+            # right-hand rule: ALWAYS circulate CCW; lane picked by travel dir.
+            direction, sweep = +1.0, d_ccw
+            r, res = (r_out, f"{rbt}#RINGA") if forward else (r_in, f"{rbt}#RINGB")
+        elif d_ccw <= math.pi:                    # CCW shorter -> outer red, forward
+            direction, r, res, sweep = +1.0, r_out, f"{rbt}#RINGA", d_ccw
+        else:                                     # CW shorter -> inner blue, backward
+            direction, r, res, sweep = -1.0, r_in, f"{rbt}#RINGB", two_pi - d_ccw
+        s_offset = r * ((direction * th_in) % two_pi)   # global entry progress
+        n = max(2, int(math.ceil(sweep / math.radians(step_deg))) + 1)
+        ang = th_in + direction * np.linspace(0.0, sweep, n)
+        arc = np.column_stack([c[0] + r * np.cos(ang), c[1] + r * np.sin(ang)])
+        xy = np.vstack([np.asarray(p_in, float), arc, np.asarray(p_out, float)])
+        return LegSeg(res, np.ascontiguousarray(xy, float), rbt, rbt, s_offset=s_offset)
+
+    def route_segs(self, pairs) -> list[LegSeg]:
+        """Legs of a route as directed segs, with a RING ARC spliced in wherever
+        the route passes through a roundabout node (ring_travel only)."""
+        if not self.ring_travel or not self.rings:
+            return self.pairs_to_segs(pairs)
+        pairs = list(pairs)
+        nodes = self.nodes_of(pairs)
+        segs: list[LegSeg] = []
+        for i, (lg, fwd) in enumerate(pairs):
+            seg = self.leg_seg(lg, fwd)
+            segs.append(seg)
+            if i + 1 < len(pairs):
+                mid = nodes[i + 1]
+                if mid in self.rings:
+                    nxt = self.leg_seg(pairs[i + 1][0], pairs[i + 1][1])
+                    # travel direction through the ring = direction of the leg
+                    # ARRIVING at it, so the outer/inner lane matches fwd/back.
+                    arc = self.ring_seg(mid, seg.xy[-1], nxt.xy[0],
+                                        forward=bool(pairs[i][1]))
+                    if arc is not None:
+                        segs.append(arc)
+        return segs
 
 
 # ======================================================================
@@ -412,15 +538,22 @@ def _speed_classes(params):
     return kmh, [x / tot for x in w]
 
 
-def build_patrol_loop(net: Network) -> list[tuple[str, bool]]:
+def build_patrol_loop(net: Network, start_prefix: str = "DB") -> list[tuple[str, bool]]:
     """A closed circuit around the map for city-monitoring patrols: visit
     the objectives ordered by bearing around the map centre, joining each
-    to the next by the shortest corridor path, then close the loop."""
+    to the next by the shortest corridor path, then close the loop. The loop
+    is rotated to START at the drone base (first `start_prefix` objective) so
+    the single patrol unit launches from and returns to the depot."""
     objs = list(net.obj_xy.items())
     cx = float(np.mean([p[0] for _i, p in objs]))
     cy = float(np.mean([p[1] for _i, p in objs]))
     order = sorted(objs, key=lambda ip: math.atan2(ip[1][1] - cy, ip[1][0] - cx))
     ids = [i for i, _p in order]
+    # rotate the bearing order so the circuit begins at the drone base
+    starts = [k for k, i in enumerate(ids) if str(i).startswith(start_prefix)]
+    if starts:
+        k = starts[0]
+        ids = ids[k:] + ids[:k]
     loop: list[tuple[str, bool]] = []
     for i in range(len(ids)):
         a, b = ids[i], ids[(i + 1) % len(ids)]
@@ -521,25 +654,25 @@ def build_fleet(net: Network, params, rng: np.random.Generator):
     for p, a in enumerate(agents):
         a.priority = (p - n) if a.is_priority else p
 
-    # ---- city-monitoring patrols: one sortie launched every INTERVAL ----
+    # ---- city-monitoring patrol: ONE unit launched from the drone base, that
+    # circulates the map perimeter and RE-LAUNCHES every PATROL_INTERVAL_MIN.
+    # A single physical drone is modelled (never two airborne at once); the
+    # relaunch scheduling is handled in simulate(). The patrol has the HIGHEST
+    # priority and is treated by deliveries as a moving (dynamic) obstacle.
     patrol_kmh = float(pget(params, "PATROL_SPEED_KMH", 50.0))
     interval_s = float(pget(params, "PATROL_INTERVAL_MIN", 30.0)) * 60.0
-    horizon_s = float(pget(params, "SHIFT_HOURS", 1.0)) * \
-        float(pget(params, "HORIZON_FACTOR", 12.0)) * 3600.0
     patrols: list[Agent] = []
-    loop = build_patrol_loop(net)
+    loop = build_patrol_loop(net, start_prefix=db_pref)
     if interval_s > 0 and loop:
-        loop_segs = net.pairs_to_segs(loop)
+        loop_segs = net.route_segs(loop)
         loop_len = sum(s.length for s in loop_segs)
-        n_sorties = int(horizon_s / interval_s) + 1
-        for j in range(n_sorties):
-            segs = list(loop_segs)               # shared read-only geometry
-            a = Agent(1_000_000 + j, "PATROL", "PATROL", False, j,
-                      segs, ["leg"] * len(segs), 0.0, len(segs), loop_len,
-                      patrol_kmh / 3.6, patrol_kmh, is_patrol=True)
-            a.arrival_t = j * interval_s         # a patroller on air every INTERVAL
-            a.battery_wh = battery_wh
-            patrols.append(a)
+        a = Agent(1_000_000, "PATROL", "PATROL", False, -(n + 1),  # top priority
+                  list(loop_segs), ["leg"] * len(loop_segs), 0.0,
+                  len(loop_segs), loop_len,
+                  patrol_kmh / 3.6, patrol_kmh, is_patrol=True)
+        a.arrival_t = 0.0                        # first sortie at shift start
+        a.battery_wh = battery_wh
+        patrols.append(a)
 
     return agents, patrols
 
@@ -570,6 +703,13 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         return max(headway_s * a.speed, sep_floor)
 
     patrol_laps = int(pget(params, "PATROL_LAPS", 1))          # loops per sortie
+    # the single patrol unit re-launches from base every PATROL_INTERVAL_MIN;
+    # deliveries treat its live position as a moving (dynamic) obstacle.
+    patrol_interval_s = float(pget(params, "PATROL_INTERVAL_MIN", 30.0)) * 60.0
+    patrol_obstacle = bool(pget(params, "PATROL_AS_OBSTACLE", True))
+    patrol_relaunch: dict[int, float] = {}     # aid -> next launch time
+    patrol_total_sorties = 0                    # completed monitoring sorties
+    patrol_total_laps = 0                       # loops flown across all sorties
     conflict_time = float(pget(params, "CONFLICT_TIME_S", 5.0))   # near-miss window
 
     # battery + dock charging
@@ -718,29 +858,34 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             k = max(1, min(len(pairs) - 1, int(a.cont_frac * len(pairs))))
             turn = nodes[k]
             flown = pairs[:k]
+            # outbound_upto is a SEG index; ring arcs make seg count != pair
+            # count, so measure segs, not pairs.
             if a.contingency == "backup":
                 alt = plan_route(turn, a.dest, a, blocked={pairs[k][0]})
                 if alt:
-                    mp = flown + alt[0]; a.outbound_upto = len(mp)
+                    a.segs = list(net.route_segs(flown + alt[0]))
+                    a.outbound_upto = len(a.segs)     # backup diversion is one-way
                 else:
                     a.contingency = "return"
             if a.contingency == "return":
                 back = plan_route(turn, a.origin, a)
                 if back is None:
                     return False
-                mp = flown + back[0]; a.outbound_upto = len(flown)
-            a.segs = list(net.pairs_to_segs(mp))
+                out_segs = list(net.route_segs(flown))
+                a.segs = out_segs + list(net.route_segs(back[0]))
+                a.outbound_upto = len(out_segs)       # return starts after flown
             a.kinds = ["leg"] * len(a.segs)
         else:
-            a.segs = list(net.pairs_to_segs(pairs))
+            a.segs = list(net.route_segs(pairs))
             a.kinds = ["leg"] * len(a.segs)
             a.outbound_upto = len(a.segs)
             if a.round_trip:
                 ret = plan_route(a.dest, a.origin, a)
                 if ret is not None:
+                    ret_segs = list(net.route_segs(ret[0]))
                     a.segs.append(None); a.kinds.append("dwell")
-                    a.segs.extend(net.pairs_to_segs(ret[0]))
-                    a.kinds.extend(["leg"] * len(ret[0]))
+                    a.segs.extend(ret_segs)
+                    a.kinds.extend(["leg"] * len(ret_segs))
         a.route_len = sum(s.length for s in a.segs if s is not None)
         return True
 
@@ -763,10 +908,13 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             if seg.res in leg_busy:
                 return False
         else:
-            # merge only if >= merge_frac of the leg (and the time headway) free
+            # merge only if the entry neighbourhood on this lane is free. Global
+            # coords: a shared ring lane is ENTERED at s_offset (its entry angle),
+            # not at 0, so check for occupants just behind..ahead of that point.
             merge_gap = max(merge_frac * seg.length, sep_of(a))
-            entry = min((s for (s, _o) in occ.get(seg.res, ())), default=np.inf)
-            if entry < merge_gap:
+            entry_g = seg.s_offset
+            occg = occ.get(seg.res, ())
+            if any((entry_g - sep_of(a)) < g < (entry_g + merge_gap) for (g, _o) in occg):
                 return False
         if node_mutex:
             key = (seg.src_node, leg_level(seg))     # (node, level): same-level only
@@ -815,7 +963,7 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         alt = plan_route(cur_node, phase_dest, a, blocked={blocked_leg})
         if not alt:
             return False
-        new_segs = net.pairs_to_segs(alt[0])
+        new_segs = net.route_segs(alt[0])
         delta = len(new_segs) - (j - nxt)
         a.segs = a.segs[:nxt] + list(new_segs) + a.segs[j:]
         a.kinds = a.kinds[:nxt] + ["leg"] * len(new_segs) + a.kinds[j:]
@@ -827,6 +975,8 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         return True
 
     frames, timeline = [], []
+    # ---- hold-cause attribution: count agent-ticks blocked by each cause ----
+    hold_cause = {"leader": 0, "node": 0, "block": 0, "launch_queue": 0}
     min_approach_global = np.inf
     min_lane_gap_global = np.inf
     peak_concurrent = peak_backlog = max_agents_per_leg = 0
@@ -854,17 +1004,25 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         if not flow_block:
             occ.clear()
             for a in active_agents:
-                if a.on_leg() and not a.is_patrol:
-                    occ.setdefault(a.cur_seg().res, []).append((a.s_local, a))
+                # the patrol is included as a DYNAMIC OBSTACLE (patrol_obstacle):
+                # deliveries sharing its leg keep their time-headway behind it and
+                # will not merge in front of it, but the patrol itself never yields
+                # (highest priority -- see the move loop, which skips leaders for it)
+                if a.on_leg() and (not a.is_patrol or patrol_obstacle):
+                    seg = a.cur_seg()
+                    # store GLOBAL progress (s_local + s_offset) so ring-lane
+                    # occupants share a comparable coordinate for spacing
+                    occ.setdefault(seg.res, []).append((a.s_local + seg.s_offset, a))
             leg_penalty.clear()
             for res, lst in occ.items():
                 pen = 0.0
                 held = False
-                for (s, ag) in lst:
+                for (_g, ag) in lst:
                     L = ag.cur_seg().length
+                    sl = ag.s_local                 # LOCAL position for the pheromone
                     # full cost in the first half, decays to 0 at the exit
-                    pen += capture_cost if s < 0.5 * L else \
-                        capture_cost * max(0.0, (L - s) / (0.5 * L))
+                    pen += capture_cost if sl < 0.5 * L else \
+                        capture_cost * max(0.0, (L - sl) / (0.5 * L))
                     if ag.holding:
                         held = True
                 # a leg with a holding/waiting occupant gets a HIGH penalty so
@@ -872,6 +1030,18 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                 if held:
                     pen += hold_penalty
                 leg_penalty[res] = pen
+        # ---- re-launch the single patrol unit at each scheduled interval ----
+        # (one physical drone: it only relaunches once its previous sortie has
+        # landed, so two patrols are never airborne at the same time)
+        for a in patrols:
+            due = patrol_relaunch.get(a.aid)
+            if due is not None and t >= due and a not in active_agents:
+                a.seg_idx = -1; a.s_local = 0.0; a.laps = 0
+                a.status = "pre"; a.holding = False; a.was_holding = False
+                a.battery_wh = battery_cap        # recharged at the base
+                if enter_leg(a, 0):
+                    a.depart_t = t; active_agents.append(a)
+                    del patrol_relaunch[a.aid]
         # ---- demand: patrols launch immediately at their scheduled time
         # (separate layer, exempt from the delivery concurrency cap so they
         # never pile up and fly out together); deliveries join the queue ----
@@ -923,12 +1093,17 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                 eff_speed = a.speed
             desired = a.s_local + eff_speed * dt
             cap = L
-            # spacing mode: keep the time headway behind the leader on this lane
+            leader_cap = node_cap = None   # for hold-cause attribution
+            # spacing mode: keep the time headway behind the leader on this lane.
+            # Compare GLOBAL progress (handles shared ring lanes); cap is a local
+            # bound, so subtract this seg's s_offset back out.
             if not flow_block and not a.is_patrol:
-                leader = min((s for (s, o) in occ.get(seg.res, ())
-                              if o is not a and s > a.s_local + 1e-6), default=None)
+                my_g = a.s_local + seg.s_offset
+                leader = min((g for (g, o) in occ.get(seg.res, ())
+                              if o is not a and g > my_g + 1e-6), default=None)
                 if leader is not None:
-                    cap = min(cap, leader - sep_of(a))
+                    leader_cap = leader - seg.s_offset - sep_of(a)
+                    cap = min(cap, leader_cap)
             if node_mutex:
                 lev = leg_level(seg)
                 zone_src = node_zone(seg.src_node, L)
@@ -943,6 +1118,7 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                     if h is None or h is a:
                         node_busy[dst_key] = a; a.held_node = dst_key
                     else:
+                        node_cap = approach_s
                         cap = min(cap, approach_s)
             new_s = max(a.s_local, min(desired, cap))
             adv = new_s - a.s_local
@@ -952,6 +1128,13 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             a.air_s += dt
             if desired > new_s + 1e-6:
                 a.holding = True
+                # attribute the hold to whichever cap actually bound this tick
+                if not a.is_patrol:
+                    if node_cap is not None and node_cap <= new_s + 1e-6 and \
+                            (leader_cap is None or node_cap <= leader_cap + 1e-6):
+                        hold_cause["node"] += 1
+                    elif leader_cap is not None:
+                        hold_cause["leader"] += 1
             a.s_local = new_s
             # drain battery: cruise power at the TRUE velocity, hover when held
             if not a.is_patrol:
@@ -971,8 +1154,14 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                 # patrols never captured a block, so they never release one
                 if a.is_patrol and nxt >= len(a.segs):
                     a.laps += 1
-                    if a.laps >= patrol_laps:  # sortie done: land (next launches in 30 min)
+                    if a.laps >= patrol_laps:  # sortie done: land, relaunch in 30 min
                         a.status = "done"; a.complete_t = t
+                        patrol_total_sorties += 1; patrol_total_laps += a.laps
+                        # schedule the next sortie of this SAME unit on the fixed
+                        # 30-min cadence (next interval boundary strictly after t)
+                        if patrol_interval_s > 0:
+                            k = math.floor(t / patrol_interval_s) + 1
+                            patrol_relaunch[a.aid] = k * patrol_interval_s
                     elif not enter_leg(a, 0):  # loop again
                         a.laps -= 1; a.holding = True
                 elif nxt >= len(a.segs):
@@ -995,6 +1184,8 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                         moved = True
                     else:
                         a.holding = True   # block ahead busy: hold at leg end
+                        if not a.is_patrol:
+                            hold_cause["block"] += 1
 
         # ---- dock charging: recharge to CHARGE_TARGET, then depart ----
         for a in active_agents:
@@ -1010,6 +1201,8 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                 elif a.dwell_left <= 0.0 and enter_leg(a, a.seg_idx + 1):
                     moved = True
 
+        # arrived-but-not-launched deliveries are blocked on the launch queue
+        hold_cause["launch_queue"] += n_waiting
         # ---- hold bookkeeping + retire completed ----
         for a in active_agents:
             if a.holding:
@@ -1127,8 +1320,8 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         "min_lane_gap_m": None if not np.isfinite(min_lane_gap_global) else min_lane_gap_global,
         "min_approach_m": None if not np.isfinite(min_approach_global) else min_approach_global,
         "effective_separation_m": sep,
-        "patrol_laps": sum(a.laps for a in patrols),
-        "patrol_sorties": sum(1 for a in patrols if a.launch_t is not None),
+        "patrol_laps": patrol_total_laps + sum(a.laps for a in patrols if not a.done),
+        "patrol_sorties": patrol_total_sorties,
         "n_legs_dir": 2 * int(net.lanes["leg_id"].nunique()),
         "conflict_time_s": conflict_time,
         "conflict_pts": conflict_pts_all,
@@ -1455,13 +1648,19 @@ def write_html(net: Network, frames, params, sep_eff, out_html: Path):
     """Self-contained interactive HTML animation: the corridor network on
     a <canvas> with the agents moving along it. Play/pause, speed and a
     time scrubber; all data embedded inline so the file opens offline."""
-    # network background geometry
+    # network background geometry. Each lane carries its side flag (0 = A/red/
+    # forward, 1 = B/blue/backward) so the browser colour-codes by direction.
     lanes = []
     for leg_id in net.lanes["leg_id"].unique():
         for lane in ("A", "B"):
             xy = _lane_xy(net.lanes, leg_id, lane)
             if len(xy) >= 2:
-                lanes.append([[round(float(x), 1), round(float(y), 1)] for x, y in xy])
+                lanes.append([0 if lane == "A" else 1,
+                              [[round(float(x), 1), round(float(y), 1)] for x, y in xy]])
+    # roundabout rings: [cx, cy, r_outer, r_inner] -> outer RED / inner BLUE
+    rings = [[round(float(c[0]), 1), round(float(c[1]), 1),
+              round(float(ro), 1), round(float(ri), 1)]
+             for (c, ro, ri) in net.rings.values()]
     tn = net.nodes[net.nodes["kind"] != "objective"]
     tn_pts = [[round(float(r.x), 1), round(float(r.y), 1)] for r in tn.itertuples()]
     objs = []
@@ -1487,8 +1686,8 @@ def write_html(net: Network, frames, params, sep_eff, out_html: Path):
         fdata.append(rows)
         cdata.append([[round(float(p[0]), 1), round(float(p[1]), 1)] for p in cf])
 
-    allx = [p[0] for pl in lanes for p in pl] + [o["x"] for o in objs]
-    ally = [p[1] for pl in lanes for p in pl] + [o["y"] for o in objs]
+    allx = [p[0] for _s, pts in lanes for p in pts] + [o["x"] for o in objs]
+    ally = [p[1] for _s, pts in lanes for p in pts] + [o["y"] for o in objs]
     bbox = [min(allx), min(ally), max(allx), max(ally)]
 
     # slowness cost-map (step 09) as a background layer, if present. Stored as
@@ -1526,7 +1725,7 @@ def write_html(net: Network, frames, params, sep_eff, out_html: Path):
             "shift_h": float(pget(params, "SHIFT_HOURS", 1.0)),
             "speed_classes": [int(c) for c in cls_desc],
         },
-        "bbox": bbox, "lanes": lanes, "tn": tn_pts, "objs": objs,
+        "bbox": bbox, "lanes": lanes, "rings": rings, "tn": tn_pts, "objs": objs,
         "times": times, "frames": fdata, "conflicts": cdata,
         "costmap": costmap,
     }
@@ -1617,8 +1816,9 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
       <h2>Legend</h2>
       <div class="legend">
         <span><b>colour = direction:</b></span>
-        <span><span class="dot" style="background:#2f6fed"></span>forward (to DK)</span>
-        <span><span class="dot" style="background:#e23b3b"></span>backward (to DB)</span>
+        <span><span class="dot" style="background:#e23b3b"></span>forward (to DK, red lane)</span>
+        <span><span class="dot" style="background:#2f6fed"></span>backward (to DB, blue lane)</span>
+        <span><span style="display:inline-block;width:12px;height:12px;border-radius:50%;border:2px solid #d62728;margin-right:5px;vertical-align:-1px"></span>roundabout: outer red / inner blue rings</span>
       </div>
       <div class="legend" id="speedleg" style="margin-top:6px"><span><b>shape = speed:</b></span></div>
       <div class="legend" style="margin-top:6px">
@@ -1684,12 +1884,26 @@ function drawNetwork(){
   ctx.clearRect(0,0,W,H);
   ctx.fillStyle = '#ffffff'; ctx.fillRect(0,0,W,H);
   if(showCostmap && cmCanvas) ctx.drawImage(cmCanvas,0,0);
-  // lane centrelines
-  ctx.strokeStyle = '#c9d2df'; ctx.lineWidth = 1.4;
+  // lane centrelines, colour-coded by direction: A = red (forward),
+  // B = blue (backward), matching the ring circulation convention
+  ctx.lineWidth = 1.4;
   for(const pl of DATA.lanes){
+    const side = pl[0], pts = pl[1];
+    ctx.strokeStyle = side ? '#9fb4ee' : '#eaa6a6';   // B blue / A red (light)
     ctx.beginPath();
-    for(let i=0;i<pl.length;i++){ const p=pl[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1])); }
+    for(let i=0;i<pts.length;i++){ const p=pts[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1])); }
     ctx.stroke();
+  }
+  // roundabout rings: two concentric circulating lanes -- outer RED (forward,
+  // CCW), inner BLUE (backward, CW). Agents circulate these; the centre is a
+  // no-fly hole.
+  if(DATA.rings){
+    for(const r of DATA.rings){
+      const cx=TX(r[0]), cy=TY(r[1]);
+      ctx.lineWidth=1.8;
+      ctx.strokeStyle='#d62728'; ctx.beginPath(); ctx.arc(cx,cy,r[2]*sc,0,7); ctx.stroke();
+      ctx.strokeStyle='#2f5fe0'; ctx.beginPath(); ctx.arc(cx,cy,r[3]*sc,0,7); ctx.stroke();
+    }
   }
   // traffic nodes
   ctx.fillStyle = '#aab6c6';
@@ -1711,8 +1925,8 @@ function drawNetwork(){
 const TRAIL = 7;
 function frameAt(k){ return DATA.frames[k]; }
 
-const COL = ['#e23b3b','#2f6fed','#7b3fbf'];        // 0 inbound, 1 outbound, 2 patrol
-const COLT = ['226,59,59','47,111,237','123,63,191'];
+const COL = ['#2f6fed','#e23b3b','#7b3fbf'];        // 0 backward=blue, 1 forward=red, 2 patrol
+const COLT = ['47,111,237','226,59,59','123,63,191'];
 
 function draw(k, f){
   f = f || 0;
@@ -1831,12 +2045,17 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
     ar.mkdir(parents=True, exist_ok=True)
 
     # ---- shared network geometry (mirrors write_html) ----
+    # each lane carries its side flag (0 = A/red/forward, 1 = B/blue/backward)
     lanes = []
     for leg_id in net.lanes["leg_id"].unique():
         for lane in ("A", "B"):
             xy = _lane_xy(net.lanes, leg_id, lane)
             if len(xy) >= 2:
-                lanes.append([[round(float(x), 1), round(float(y), 1)] for x, y in xy])
+                lanes.append([0 if lane == "A" else 1,
+                              [[round(float(x), 1), round(float(y), 1)] for x, y in xy]])
+    rings = [[round(float(c[0]), 1), round(float(c[1]), 1),
+              round(float(ro), 1), round(float(ri), 1)]
+             for (c, ro, ri) in net.rings.values()]
     tn = net.nodes[net.nodes["kind"] != "objective"]
     tn_pts = [[round(float(r.x), 1), round(float(r.y), 1)] for r in tn.itertuples()]
     objs = []
@@ -1844,8 +2063,8 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
         objs.append({"id": str(r.net_id), "x": round(float(r.x), 1),
                      "y": round(float(r.y), 1),
                      "kind": "DB" if str(r.net_id).startswith("DB") else "DK"})
-    allx = [p[0] for pl in lanes for p in pl] + [o["x"] for o in objs]
-    ally = [p[1] for pl in lanes for p in pl] + [o["y"] for o in objs]
+    allx = [p[0] for _s, pts in lanes for p in pts] + [o["x"] for o in objs]
+    ally = [p[1] for _s, pts in lanes for p in pts] + [o["y"] for o in objs]
     bbox = [min(allx), min(ally), max(allx), max(ally)]
     # ---- global timeline shared by every agent page: the slowness costmap,
     #      ALL agents per frame, and conflicts, so each replay can show the
@@ -1887,7 +2106,8 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
     levels = {"n": int(pget(params, "FLIGHT_LEVELS", 4)),
               "base_z": float(pget(params, "BASE_LEVEL_M", 60.0)),
               "sep": float(pget(params, "LEVEL_SEP_M", 30.0))}
-    net_json = json.dumps({"bbox": bbox, "lanes": lanes, "tn": tn_pts, "objs": objs,
+    net_json = json.dumps({"bbox": bbox, "lanes": lanes, "rings": rings,
+                           "tn": tn_pts, "objs": objs,
                            "costmap": costmap, "times": times, "frames": fdata,
                            "conflicts": cdata, "levels": levels}, separators=(",", ":"))
     (ar / "network.js").write_text("window.NETWORK=" + net_json + ";\n", encoding="utf-8")
@@ -2029,10 +2249,20 @@ let showCostmap=!!NET.costmap;
 function bg(){
   ctx.clearRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
   if(showCostmap&&cmCanvas) ctx.drawImage(cmCanvas,0,0);
-  ctx.strokeStyle=showCostmap?'rgba(255,255,255,.55)':'#dbe2ec'; ctx.lineWidth=1.1;
-  for(const pl of NET.lanes){ ctx.beginPath();
-    for(let i=0;i<pl.length;i++){const p=pl[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1]));}
+  // lane centrelines colour-coded by direction: A=red(forward), B=blue(backward)
+  ctx.lineWidth=1.1;
+  for(const pl of NET.lanes){ const side=pl[0], pts=pl[1];
+    ctx.strokeStyle = showCostmap
+      ? (side?'rgba(120,150,240,.7)':'rgba(220,120,120,.7)')
+      : (side?'#9fb4ee':'#eaa6a6');
+    ctx.beginPath();
+    for(let i=0;i<pts.length;i++){const p=pts[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1]));}
     ctx.stroke(); }
+  // roundabout rings: outer red (forward) / inner blue (backward)
+  if(NET.rings){ ctx.lineWidth=1.6;
+    for(const r of NET.rings){ const cx=TX(r[0]),cy=TY(r[1]);
+      ctx.strokeStyle='#d62728'; ctx.beginPath(); ctx.arc(cx,cy,r[2]*sc,0,7); ctx.stroke();
+      ctx.strokeStyle='#2f5fe0'; ctx.beginPath(); ctx.arc(cx,cy,r[3]*sc,0,7); ctx.stroke(); } }
   ctx.font='bold 12px system-ui'; ctx.textBaseline='middle';
   for(const o of NET.objs){ const X=TX(o.x),Y=TY(o.y);
     if(o.kind==='DB'){ctx.fillStyle='#c0392b';ctx.fillRect(X-5,Y-5,10,10);}
@@ -2421,10 +2651,21 @@ def main() -> None:
     print(f"Output dir    : {output_dir}")
     print("=" * 66)
 
-    net = Network(corridor_dir)
+    ring_travel = bool(pget(params, "RING_TRAVEL", False))
+    lane_gap = float(pget(params, "ROUNDABOUT_LANE_GAP_M", 50.0))
+    ring_right_hand = bool(pget(params, "RING_RIGHT_HAND", True))
+    net = Network(corridor_dir, ring_travel=ring_travel, lane_gap=lane_gap,
+                  ring_right_hand=ring_right_hand)
     print(f"Network       : {len(net.obj_xy)} objectives, "
           f"{net.lanes['leg_id'].nunique()} legs, "
           f"{len(net._routes)} pair routes")
+    if ring_travel:
+        rule = ("right-hand (one-way CCW)" if ring_right_hand else "shorter-arc")
+        print(f"Ring travel   : ON -- {len(net.rings)} roundabouts, {rule}; agents "
+              f"circulate the outer RED ring (forward) / inner BLUE ring (backward), "
+              f"lane gap {lane_gap:.0f} m")
+    else:
+        print("Ring travel   : OFF -- legs meet ring nodes directly (no ring arcs)")
 
     rng = np.random.default_rng(int(pget(params, "SIM_SEED", 12345)))
     agents, patrols = build_fleet(net, params, rng)
@@ -2441,8 +2682,11 @@ def main() -> None:
           f"({n_rt} round trips, {n_normal - n_rt} one-way, "
           f"{n_cont} contingency: {n_backup} backup / {n_return} return-to-base)")
     print(f"Speed classes : {cls_str}")
-    print(f"Patrols       : one sortie every {pget(params,'PATROL_INTERVAL_MIN',30.0)} min "
-          f"@ {pget(params,'PATROL_SPEED_KMH',50.0)} km/h ({len(patrols)} scheduled)")
+    print(f"Patrol        : {len(patrols)} unit from base, re-launches every "
+          f"{pget(params,'PATROL_INTERVAL_MIN',30.0)} min @ "
+          f"{pget(params,'PATROL_SPEED_KMH',50.0)} km/h "
+          f"(highest priority, dynamic obstacle="
+          f"{bool(pget(params,'PATROL_AS_OBSTACLE',True))})")
     fm = str(pget(params, "FLOW_MODE", "spacing")).lower()
     aw = float(pget(params, "ARRIVAL_WINDOW_H", pget(params, "SHIFT_HOURS", 1.0)))
     flow_desc = (f">={float(pget(params,'SEPARATION_M',80.0)):.0f}m car-following (deadlock-free)"

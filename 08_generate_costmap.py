@@ -22,6 +22,13 @@ forced to OUTSIDE_SLOWNESS = 1e-2 (a crawl), so agents that stray off the
 corridors are slowed to a near halt and effectively cannot fly out of the
 map. The corridors themselves are unaffected.
 
+Roundabouts are TWO concentric circulating corridors (mirrors 07): an outer
+ring lane at radius_m and an inner ring lane at radius_m - lane_gap. BOTH ring
+bands are part of the network and keep their normal density slowness. The disk
+ENCLOSED by the inner ring is not a lane, so its cost is RAISED (slowness
+forced to RING_INTERIOR_SLOWNESS) -- agents circulate on the rings and cannot
+cut straight across the roundabout centre.
+
 Pipeline
 --------
     09_simulate_agents_2d.py   (run once, base speeds)  -> traffic samples
@@ -78,17 +85,48 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--outside-slowness", type=float, default=1e-2,
                    help="slowness forced on cells outside every corridor "
                         "(low = agents crawl and cannot leave the network)")
+    p.add_argument("--corridor-param-file", default="params/corridor_network.params",
+                   help="07's params, read for ROUNDABOUT_LANE_GAP_M so the "
+                        "inner ring lane matches the geometry 07 built")
+    p.add_argument("--roundabout-lane-gap", type=float, default=None,
+                   help="gap (m) between the outer and inner ring lane; "
+                        "default reads ROUNDABOUT_LANE_GAP_M from the param file")
+    p.add_argument("--ring-interior-slowness", type=float, default=None,
+                   help="slowness forced on the disk inside each roundabout's "
+                        "inner ring (raised cost so agents cannot cut across the "
+                        "centre); default = outside-slowness")
     return p.parse_args()
 
 
+def load_lane_gap(param_file: Path, default: float = 50.0) -> float:
+    """Read ROUNDABOUT_LANE_GAP_M from 07's corridor params so the costmap's
+    inner ring matches the ring geometry 07 actually built."""
+    if not param_file.exists():
+        return default
+    ns: dict = {}
+    exec(compile(param_file.read_text(encoding="utf-8"), str(param_file), "exec"), {}, ns)
+    return float(ns.get("ROUNDABOUT_LANE_GAP_M", default))
+
+
 def corridor_mask(lanes: pd.DataFrame, xc: np.ndarray, yc: np.ndarray,
-                  half_width: float, rings: pd.DataFrame | None = None) -> np.ndarray:
-    """Boolean grid[ny,nx]: True where a cell centre lies within `half_width`
-    metres of any lane centreline OR of a roundabout ring. Lane polylines are
-    densely resampled so a nearest-point KD-tree query approximates the true
-    distance-to-polyline; the ROUNDABOUT circulating corridors are added as an
-    annular band |dist_to_centre - radius| <= half_width (the leg lanes stop AT
-    the ring boundary, so without this the ring interiors read as off-corridor)."""
+                  half_width: float, rings: pd.DataFrame | None = None,
+                  lane_gap: float = 0.0) -> tuple[np.ndarray, np.ndarray]:
+    """Return (inside, ring_interior), each a Boolean grid[ny,nx].
+
+    `inside` is True where a cell centre lies within `half_width` metres of any
+    lane centreline OR of a roundabout ring lane. Lane polylines are densely
+    resampled so a nearest-point KD-tree query approximates the true distance-
+    to-polyline.
+
+    Each roundabout is TWO concentric circulating corridors (mirrors 07's ring
+    model): an OUTER lane at radius_m and an INNER lane at radius_m - lane_gap
+    (floored at 0.3*radius_m). BOTH annular bands |dist_to_centre - r| <=
+    half_width are added -- the leg lanes stop AT the outer ring boundary, so
+    without this the ring lanes read as off-corridor.
+
+    `ring_interior` is the disk ENCLOSED by the inner ring (dist_to_centre <
+    r_in - half_width): it is not part of any lane, and the caller raises its
+    cost so agents cannot cut straight across the roundabout centre."""
     step = max(2.0, half_width / 3.0)
     pts = []
     for (leg_id, lane), g in lanes.groupby(["leg_id", "lane"]):
@@ -110,15 +148,22 @@ def corridor_mask(lanes: pd.DataFrame, xc: np.ndarray, yc: np.ndarray,
     grid_pts = np.column_stack([gx.ravel(), gy.ravel()])
     dist, _ = tree.query(grid_pts, k=1)
     inside = (dist <= half_width).reshape(gx.shape)
+    ring_interior = np.zeros_like(inside)
     if rings is not None and len(rings):              # add the ring circulating bands
         for r in rings.itertuples():
             dcen = np.hypot(gx - float(r.center_x), gy - float(r.center_y))
-            inside |= np.abs(dcen - float(r.radius_m)) <= half_width
-    return inside
+            r_out = float(r.radius_m)
+            r_in = max(0.3 * r_out, r_out - lane_gap)  # mirrors 07 (build_figure ring draw)
+            inside |= np.abs(dcen - r_out) <= half_width
+            inside |= np.abs(dcen - r_in) <= half_width
+            ring_interior |= dcen < (r_in - half_width)
+    return inside, ring_interior
 
 
-def draw_network(ax, corridor_dir: Path):
-    """Light overlay of lane centrelines + roundabout rings + objectives."""
+def draw_network(ax, corridor_dir: Path, lane_gap: float = 0.0):
+    """Light overlay of lane centrelines + roundabout rings + objectives.
+    Each roundabout draws BOTH circulating lanes (outer at radius_m, inner at
+    radius_m - lane_gap), matching 07's two-ring model and the corridor mask."""
     lanes = pd.read_csv(corridor_dir / "lane_nodes.csv")
     for leg_id in lanes["leg_id"].unique():
         for lane in ("A", "B"):
@@ -130,8 +175,11 @@ def draw_network(ax, corridor_dir: Path):
     if ring_file.exists():
         from matplotlib.patches import Circle
         for r in pd.read_csv(ring_file).itertuples():
-            ax.add_patch(Circle((float(r.center_x), float(r.center_y)), float(r.radius_m),
-                                 fill=False, ec="0.5", lw=0.6, alpha=0.7, zorder=5))
+            c = (float(r.center_x), float(r.center_y))
+            r_out = float(r.radius_m)
+            r_in = max(0.3 * r_out, r_out - lane_gap)  # mirrors 07 (inner ring lane)
+            for rr in (r_out, r_in):
+                ax.add_patch(Circle(c, rr, fill=False, ec="0.5", lw=0.6, alpha=0.7, zorder=5))
     nodes = pd.read_csv(corridor_dir / "network_nodes.csv")
     obj = nodes[nodes["kind"] == "objective"]
     for r in obj.itertuples():
@@ -192,15 +240,26 @@ def main() -> None:
     lanes = pd.read_csv(corridor_dir / "lane_nodes.csv")
     ring_file = corridor_dir / "roundabouts.csv"
     rings = pd.read_csv(ring_file) if ring_file.exists() else None
+    lane_gap = (args.roundabout_lane_gap if args.roundabout_lane_gap is not None
+                else load_lane_gap(THIS_DIR / args.corridor_param_file))
+    interior_slow = (args.ring_interior_slowness if args.ring_interior_slowness is not None
+                     else args.outside_slowness)
     xc = x0 + args.res * (np.arange(nx) + 0.5)
     yc = y0 + args.res * (np.arange(ny) + 0.5)
-    inside = corridor_mask(lanes, xc, yc, args.corridor_half_width, rings)   # [ny,nx]
+    inside, ring_interior = corridor_mask(lanes, xc, yc, args.corridor_half_width,
+                                          rings, lane_gap)                    # [ny,nx]
     slowness = np.where(inside, slowness, args.outside_slowness)
+    # raise cost inside each roundabout's inner ring (the enclosed disk is not a
+    # lane); applied AFTER the corridor confinement so it overrides any lane that
+    # clips through the centre
+    slowness = np.where(ring_interior, interior_slow, slowness)
     frac_in = float(inside.mean())
     print(f"Corridor mask : half-width {args.corridor_half_width:.0f} m, "
           f"{frac_in*100:.1f}% of cells inside "
-          f"({0 if rings is None else len(rings)} roundabout rings included); "
-          f"outside slowness {args.outside_slowness:.2f}")
+          f"({0 if rings is None else len(rings)} roundabouts x2 ring lanes, "
+          f"lane gap {lane_gap:.0f} m); "
+          f"outside slowness {args.outside_slowness:.2f}, "
+          f"ring-interior slowness {interior_slow:.2f}")
 
     np.savez(out_dir / "slowness_costmap.npz",
              slowness=slowness.astype(np.float32),
@@ -217,7 +276,7 @@ def main() -> None:
                    vmin=args.min_slowness, vmax=args.max_slowness, zorder=1)
     ax.contour(xc, yc, inside.astype(float), levels=[0.5],
                colors="k", linewidths=0.6, linestyles="--", zorder=6)
-    draw_network(ax, corridor_dir)
+    draw_network(ax, corridor_dir, lane_gap)
     cb = fig.colorbar(im, ax=ax, shrink=0.75)
     cb.set_label("slowness  (1 = full speed, low = congested/slow)")
     ax.set_aspect("equal"); ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
@@ -229,7 +288,7 @@ def main() -> None:
     # ---- smoothed density figure ----
     fig, ax = plt.subplots(figsize=(12, 11))
     im = ax.imshow(dens_s, origin="lower", extent=extent, cmap="inferno", zorder=1)
-    draw_network(ax, corridor_dir)
+    draw_network(ax, corridor_dir, lane_gap)
     fig.colorbar(im, ax=ax, shrink=0.75).set_label("smoothed traffic density")
     ax.set_aspect("equal"); ax.set_xlabel("x (m)"); ax.set_ylabel("y (m)")
     ax.set_title("Gaussian-smoothed traffic density")

@@ -42,7 +42,7 @@
 </div>
 <script src="network.js"></script>
 <script>
-const F={"aid":12,"focal":[[1,4196.4,1354.8,1,0,2],[2,3960.8,1454.4,1,0,2],[3,3725.3,1554.0,1,0,2],[4,3486.4,1655.0,1,0,2],[5,3296.3,1735.5,1,0,2],[6,3234.4,1836.5,1,0,1],[7,3184.0,1979.0,1,0,1],[8,3120.6,2155.3,1,0,1],[9,3034.9,2393.1,1,0,1],[10,2953.4,2619.4,1,0,1],[11,2873.2,2792.0,1,0,2],[12,2721.0,2948.3,1,0,2],[13,2518.4,3156.3,1,0,2],[14,2316.2,3363.9,1,0,2],[15,2160.8,3523.4,1,0,2]],"stats":{"agent":12,"kind":"one_way","origin":"DB02","dest":"DK01","speed_kmh":60.0,"launch_s":18.0,"complete_s":308.0,"flight_time_s":290.0,"route_len_m":3263.7,"flown_m":3263.7,"n_holds":4,"hold_s":4.0,"energy_wh":24.8,"battery_end_pct":87.9,"completed":true,"battery_dead":false}}, NET=window.NETWORK;
+const F={"aid":12,"focal":[[1,4209.9,1363.1,1,0,2],[2,3786.5,1856.5,1,0,2],[3,3610.0,2130.7,1,0,2],[4,3432.4,2406.7,1,0,2],[5,2835.2,3079.4,1,0,2],[6,2596.9,3241.8,1,0,2],[7,2357.9,3404.5,1,0,2],[8,2196.6,3514.4,1,0,2]],"stats":{"agent":12,"kind":"one_way","origin":"DB02","dest":"DK01","speed_kmh":60.0,"launch_s":18.0,"complete_s":180.0,"flight_time_s":162.0,"route_len_m":2123.9,"flown_m":2123.9,"n_holds":3,"hold_s":3.0,"energy_wh":16.17,"battery_end_pct":91.9,"completed":true,"battery_dead":false}}, NET=window.NETWORK;
 const FO=F.focal;                 // [[kg, x, y, cat, hold], ...]
 const FR=NET.frames||[], TIMES=NET.times||[], CONF=NET.conflicts||[];
 const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
@@ -78,10 +78,20 @@ let showCostmap=!!NET.costmap;
 function bg(){
   ctx.clearRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
   if(showCostmap&&cmCanvas) ctx.drawImage(cmCanvas,0,0);
-  ctx.strokeStyle=showCostmap?'rgba(255,255,255,.55)':'#dbe2ec'; ctx.lineWidth=1.1;
-  for(const pl of NET.lanes){ ctx.beginPath();
-    for(let i=0;i<pl.length;i++){const p=pl[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1]));}
+  // lane centrelines colour-coded by direction: A=red(forward), B=blue(backward)
+  ctx.lineWidth=1.1;
+  for(const pl of NET.lanes){ const side=pl[0], pts=pl[1];
+    ctx.strokeStyle = showCostmap
+      ? (side?'rgba(120,150,240,.7)':'rgba(220,120,120,.7)')
+      : (side?'#9fb4ee':'#eaa6a6');
+    ctx.beginPath();
+    for(let i=0;i<pts.length;i++){const p=pts[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1]));}
     ctx.stroke(); }
+  // roundabout rings: outer red (forward) / inner blue (backward)
+  if(NET.rings){ ctx.lineWidth=1.6;
+    for(const r of NET.rings){ const cx=TX(r[0]),cy=TY(r[1]);
+      ctx.strokeStyle='#d62728'; ctx.beginPath(); ctx.arc(cx,cy,r[2]*sc,0,7); ctx.stroke();
+      ctx.strokeStyle='#2f5fe0'; ctx.beginPath(); ctx.arc(cx,cy,r[3]*sc,0,7); ctx.stroke(); } }
   ctx.font='bold 12px system-ui'; ctx.textBaseline='middle';
   for(const o of NET.objs){ const X=TX(o.x),Y=TY(o.y);
     if(o.kind==='DB'){ctx.fillStyle='#c0392b';ctx.fillRect(X-5,Y-5,10,10);}

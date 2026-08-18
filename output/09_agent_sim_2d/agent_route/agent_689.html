@@ -42,7 +42,7 @@
 </div>
 <script src="network.js"></script>
 <script>
-const F={"aid":689,"focal":[[409,3066.0,4450.7,1,0,4],[410,3045.7,4223.1,1,0,4],[411,3026.2,4003.6,1,0,4],[412,3004.8,3813.4,1,0,4],[413,2980.8,3602.4,1,0,4],[414,3030.8,3405.7,1,0,4],[415,3101.9,3362.7,0,0,1],[416,3030.1,3542.2,0,0,1],[417,2827.6,3575.0,0,0,3],[418,2578.7,3575.0,0,0,3],[419,2516.7,3575.0,0,1,3],[420,2516.7,3575.0,0,1,3],[421,2441.6,3575.0,0,0,3],[422,2221.6,3575.0,0,0,3],[423,2100.0,3575.0,0,1,3],[424,2118.4,3588.7,0,0,1],[425,2090.2,3743.8,0,0,1],[426,2052.9,3948.9,0,0,1],[427,2058.2,4096.8,0,0,0],[428,2280.0,4187.6,0,0,0],[429,2522.0,4286.5,0,0,0],[430,2760.5,4384.1,0,0,0],[431,2989.3,4477.7,0,0,0]],"stats":{"agent":689,"kind":"return","origin":"DK03","dest":"DB02","speed_kmh":50.0,"launch_s":8172.0,"complete_s":8632.0,"flight_time_s":460.0,"route_len_m":4191.1,"flown_m":4191.1,"n_holds":9,"hold_s":83.0,"energy_wh":34.74,"battery_end_pct":82.2,"completed":true,"battery_dead":false}}, NET=window.NETWORK;
+const F={"aid":689,"focal":[[831,3072.4,4525.0,1,0,4],[832,3066.1,4460.6,1,0,4],[833,3059.8,4395.3,1,0,4],[834,3051.4,4309.9,1,0,4],[835,3044.8,4242.2,1,1,4],[836,3044.8,4242.2,1,1,4],[837,3044.8,4242.2,1,1,4],[838,3044.8,4242.2,1,1,4],[839,3044.8,4242.2,1,1,4],[840,3044.8,4242.2,1,1,4],[841,3044.8,4242.2,1,1,4],[842,3044.8,4242.2,1,1,4],[843,3044.8,4242.2,1,1,4],[844,3103.8,4332.2,1,0,1],[845,3112.2,4417.4,1,0,1],[846,3118.8,4485.1,1,0,1]],"stats":{"agent":689,"kind":"return","origin":"DK03","dest":"DB02","speed_kmh":50.0,"launch_s":16614.0,"complete_s":16935.0,"flight_time_s":321.0,"route_len_m":573.0,"flown_m":573.0,"n_holds":2,"hold_s":182.0,"energy_wh":15.18,"battery_end_pct":90.1,"completed":true,"battery_dead":false}}, NET=window.NETWORK;
 const FO=F.focal;                 // [[kg, x, y, cat, hold], ...]
 const FR=NET.frames||[], TIMES=NET.times||[], CONF=NET.conflicts||[];
 const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
@@ -78,10 +78,20 @@ let showCostmap=!!NET.costmap;
 function bg(){
   ctx.clearRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
   if(showCostmap&&cmCanvas) ctx.drawImage(cmCanvas,0,0);
-  ctx.strokeStyle=showCostmap?'rgba(255,255,255,.55)':'#dbe2ec'; ctx.lineWidth=1.1;
-  for(const pl of NET.lanes){ ctx.beginPath();
-    for(let i=0;i<pl.length;i++){const p=pl[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1]));}
+  // lane centrelines colour-coded by direction: A=red(forward), B=blue(backward)
+  ctx.lineWidth=1.1;
+  for(const pl of NET.lanes){ const side=pl[0], pts=pl[1];
+    ctx.strokeStyle = showCostmap
+      ? (side?'rgba(120,150,240,.7)':'rgba(220,120,120,.7)')
+      : (side?'#9fb4ee':'#eaa6a6');
+    ctx.beginPath();
+    for(let i=0;i<pts.length;i++){const p=pts[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1]));}
     ctx.stroke(); }
+  // roundabout rings: outer red (forward) / inner blue (backward)
+  if(NET.rings){ ctx.lineWidth=1.6;
+    for(const r of NET.rings){ const cx=TX(r[0]),cy=TY(r[1]);
+      ctx.strokeStyle='#d62728'; ctx.beginPath(); ctx.arc(cx,cy,r[2]*sc,0,7); ctx.stroke();
+      ctx.strokeStyle='#2f5fe0'; ctx.beginPath(); ctx.arc(cx,cy,r[3]*sc,0,7); ctx.stroke(); } }
   ctx.font='bold 12px system-ui'; ctx.textBaseline='middle';
   for(const o of NET.objs){ const X=TX(o.x),Y=TY(o.y);
     if(o.kind==='DB'){ctx.fillStyle='#c0392b';ctx.fillRect(X-5,Y-5,10,10);}

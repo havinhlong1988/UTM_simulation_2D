@@ -98,9 +98,19 @@ PRIORITY_SPEED_KMH     = 60.0              # speed class forced on priority miss
 # City-monitoring patrols ---------------------------------------------
 # One patrol sortie takes off every PATROL_INTERVAL_MIN minutes and flies
 # PATROL_LAPS loop(s) of the map perimeter, then lands.
-PATROL_INTERVAL_MIN = 30.0   # a patroller is on air every 30 minutes
+# A SINGLE patrol unit departs the drone base, flies one perimeter loop, lands,
+# and re-launches every PATROL_INTERVAL_MIN (one physical drone -- never two
+# airborne at once). It holds the highest priority and, with PATROL_AS_OBSTACLE,
+# is treated by deliveries as a moving obstacle they keep clear of / behind.
+PATROL_INTERVAL_MIN = 30.0   # the patrol unit re-launches every 30 minutes
 PATROL_LAPS         = 1      # perimeter loops per sortie
 PATROL_SPEED_KMH    = 50.0   # patrol cruise speed
+PATROL_AS_OBSTACLE  = True   # deliveries yield to / space behind the patrol
+
+# RIGHT-HAND TRAFFIC on roundabout rings (only active when RING_TRAVEL is on):
+# every agent circulates counter-clockwise once inside a ring, so nobody cuts
+# across the wrong way. Off -> legacy shorter-arc rule.
+RING_RIGHT_HAND     = True
 
 # Contingencies -------------------------------------------------------
 # A fraction of trips hit a "false condition" mid-outbound and must
@@ -173,9 +183,9 @@ BASE_LEVEL_M  = 60.0          # altitude of the lowest band (m)
 # network under 1000-agent load (circular waits at hubs -> only ~1% finish), so
 # it is left OFF -- flight levels + metering already cut conflicts ~78% without
 # any throughput loss. Enable only with much smaller zones / lighter load.
-NODE_MUTEX_ENABLE = False
-NODE_APPROACH_M      = 50.0   # node-mutex zone at traffic nodes (if enabled)
-OBJECTIVE_APPROACH_M = 120.0  # node-mutex zone at DB/DK hubs (if enabled)
+NODE_MUTEX_ENABLE = True
+NODE_APPROACH_M      = 20.0   # node-mutex zone at traffic nodes (if enabled)
+OBJECTIVE_APPROACH_M = 50.0   # node-mutex zone at DB/DK hubs (if enabled)
 
 # Time stepping -------------------------------------------------------
 DT_S              = 1.0       # simulation step

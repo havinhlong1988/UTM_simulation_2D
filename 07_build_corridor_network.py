@@ -1205,19 +1205,29 @@ def plot_network(df: pd.DataFrame, nodes: pd.DataFrame, legs: pd.DataFrame, lane
             ax.text(c[0], c[1], str(r["rbt_id"]), color="#d35400", fontsize=7.5,
                     weight="bold", ha="center", va="center", zorder=21)
             ringmap[str(r["rbt_id"])] = np.array(c, float)
-        ex, ey = [], []
+        # ring ENTRY nodes: the ACTUAL lane endpoints on each ring. Lane A meets
+        # the OUTER (red) ring, lane B penetrates to the INNER (blue) ring (see
+        # clip_legs_to_rings), so every incident leg contributes TWO entry nodes
+        # -- one red (outer), one blue (inner) -- radially + laterally separated.
+        ent = {"A": ([], [], "red", "#e8352a", "ring entry (outer / lane A)"),
+               "B": ([], [], "blue", "#1f4fd6", "ring entry (inner / lane B)")}
         for _, leg in legs.iterrows():
-            pxy = np.asarray(leg["path_xy"], float)
-            if len(pxy) < 1:
-                continue
             for nid in (str(leg["a_id"]), str(leg["b_id"])):
-                if nid in ringmap:
-                    cc = ringmap[nid]
-                    e = pxy[0] if np.hypot(*(pxy[0] - cc)) < np.hypot(*(pxy[-1] - cc)) else pxy[-1]
-                    ex.append(e[0]); ey.append(e[1])
-        if ex:
-            ax.scatter(ex, ey, s=18, c="#d35400", edgecolors="k", linewidths=0.4,
-                       zorder=22, label="ring entry")
+                if nid not in ringmap:
+                    continue
+                cc = ringmap[nid]
+                for lane in ("A", "B"):
+                    lxy = _lane_xy(lanes, str(leg["leg_id"]), lane)
+                    if len(lxy) < 1:
+                        continue
+                    e = (lxy[0] if np.hypot(*(lxy[0] - cc)) < np.hypot(*(lxy[-1] - cc))
+                         else lxy[-1])
+                    ent[lane][0].append(e[0]); ent[lane][1].append(e[1])
+        for lane in ("A", "B"):
+            xs, ys, _ecol, fcol, lab = ent[lane]
+            if xs:
+                ax.scatter(xs, ys, s=24, c=fcol, edgecolors="k", linewidths=0.5,
+                           zorder=23, label=lab)
         ax.plot([], [], "-", color="red", lw=2.0, label="roundabout outer lane")
         ax.plot([], [], "-", color="blue", lw=2.0, label="roundabout inner lane")
 

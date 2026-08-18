@@ -42,7 +42,7 @@
 </div>
 <script src="network.js"></script>
 <script>
-const F={"aid":1,"focal":[[1,2091.6,3415.8,1,0,4],[2,2115.9,3221.6,1,0,4],[3,2145.2,2987.2,1,0,4],[4,2174.5,2752.4,1,0,4],[5,2202.3,2529.8,1,0,4],[6,2222.2,2370.8,1,0,4],[7,2203.6,2260.2,1,0,4],[8,2170.8,2117.9,1,0,4],[9,2132.7,1953.1,1,0,4],[10,2107.6,1844.2,1,0,4],[11,2096.0,1793.8,1,0,4],[12,2089.7,1766.4,1,0,4],[13,2086.4,1752.3,1,0,4],[14,2083.2,1738.2,1,0,4],[15,2080.9,1728.5,1,0,4],[16,2078.9,1719.7,1,0,4],[17,2075.8,1706.1,1,0,4],[18,2086.8,1722.1,1,0,3],[19,2080.7,1720.2,1,0,3],[20,2068.5,1716.3,1,0,3],[21,2055.2,1712.2,1,0,3],[22,2041.9,1708.0,1,0,3],[23,2013.0,1699.0,1,0,3],[24,1966.6,1684.5,1,0,3],[25,1872.0,1654.9,1,0,3],[26,1709.4,1604.1,1,0,3],[27,1535.1,1549.6,1,0,3],[28,1392.2,1504.9,1,0,3],[44,1383.2,1585.1,0,0,1],[45,1371.7,1689.8,0,0,1],[46,1364.6,1755.1,0,0,1],[47,1360.2,1795.3,0,0,1],[48,1358.0,1815.3,0,0,1],[49,1357.2,1823.1,0,0,1],[50,1356.3,1830.9,0,0,1],[51,1355.4,1838.7,0,0,1],[52,1354.6,1846.6,0,0,1],[53,1353.8,1853.7,0,0,1],[54,1353.3,1858.0,0,0,1],[55,1352.9,1862.3,0,0,1],[56,1352.4,1866.6,0,0,1],[57,1351.9,1870.8,0,0,1],[58,1351.5,1875.1,0,0,1],[59,1351.0,1879.4,0,0,1],[60,1350.5,1883.7,0,0,1],[61,1338.9,1861.5,0,0,0],[62,1342.7,1863.4,0,0,0],[63,1346.6,1865.4,0,0,0],[64,1350.4,1867.3,0,0,0],[65,1354.3,1869.3,0,0,0],[66,1358.1,1871.2,0,0,0],[67,1368.8,1876.6,0,0,0],[68,1386.3,1885.5,0,0,0],[69,1410.3,1897.6,0,0,0],[70,1471.9,1928.7,0,0,0],[71,1608.5,1997.8,0,0,0],[72,1808.6,2098.9,0,0,0],[73,2009.3,2200.3,0,0,0],[74,2163.1,2278.1,0,0,0],[75,2273.3,2365.5,0,0,1],[76,2253.9,2520.1,0,0,1],[77,2226.2,2741.7,0,0,1],[78,2196.8,2977.3,0,0,1],[79,2167.5,3211.6,0,0,1],[80,2142.2,3414.4,0,0,1]],"stats":{"agent":1,"kind":"round_trip","origin":"DK01","dest":"DB01","speed_kmh":50.0,"launch_s":2.0,"complete_s":1619.0,"flight_time_s":1617.0,"route_len_m":5299.3,"flown_m":5299.3,"n_holds":6,"hold_s":6.0,"energy_wh":37.88,"battery_end_pct":65.4,"completed":true,"battery_dead":false}}, NET=window.NETWORK;
+const F={"aid":1,"focal":[[1,2030.8,3510.5,1,0,3],[2,1943.4,3413.4,1,0,3],[3,1800.7,3254.9,1,0,3],[4,1714.2,2763.0,1,0,4],[5,1839.5,2540.7,1,0,4],[6,2082.0,1809.2,1,0,4],[7,1743.2,1493.7,1,0,2],[8,1590.7,1495.0,1,0,2],[9,1475.9,1496.0,1,0,2],[10,1380.5,1496.8,1,0,2]],"stats":{"agent":1,"kind":"round_trip","origin":"DK01","dest":"DB01","speed_kmh":50.0,"launch_s":2.0,"complete_s":NaN,"flight_time_s":NaN,"route_len_m":3545.9,"flown_m":1701.3,"n_holds":4,"hold_s":4.0,"energy_wh":12.29,"battery_end_pct":92.6,"completed":false,"battery_dead":false}}, NET=window.NETWORK;
 const FO=F.focal;                 // [[kg, x, y, cat, hold], ...]
 const FR=NET.frames||[], TIMES=NET.times||[], CONF=NET.conflicts||[];
 const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
@@ -78,10 +78,20 @@ let showCostmap=!!NET.costmap;
 function bg(){
   ctx.clearRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
   if(showCostmap&&cmCanvas) ctx.drawImage(cmCanvas,0,0);
-  ctx.strokeStyle=showCostmap?'rgba(255,255,255,.55)':'#dbe2ec'; ctx.lineWidth=1.1;
-  for(const pl of NET.lanes){ ctx.beginPath();
-    for(let i=0;i<pl.length;i++){const p=pl[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1]));}
+  // lane centrelines colour-coded by direction: A=red(forward), B=blue(backward)
+  ctx.lineWidth=1.1;
+  for(const pl of NET.lanes){ const side=pl[0], pts=pl[1];
+    ctx.strokeStyle = showCostmap
+      ? (side?'rgba(120,150,240,.7)':'rgba(220,120,120,.7)')
+      : (side?'#9fb4ee':'#eaa6a6');
+    ctx.beginPath();
+    for(let i=0;i<pts.length;i++){const p=pts[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1]));}
     ctx.stroke(); }
+  // roundabout rings: outer red (forward) / inner blue (backward)
+  if(NET.rings){ ctx.lineWidth=1.6;
+    for(const r of NET.rings){ const cx=TX(r[0]),cy=TY(r[1]);
+      ctx.strokeStyle='#d62728'; ctx.beginPath(); ctx.arc(cx,cy,r[2]*sc,0,7); ctx.stroke();
+      ctx.strokeStyle='#2f5fe0'; ctx.beginPath(); ctx.arc(cx,cy,r[3]*sc,0,7); ctx.stroke(); } }
   ctx.font='bold 12px system-ui'; ctx.textBaseline='middle';
   for(const o of NET.objs){ const X=TX(o.x),Y=TY(o.y);
     if(o.kind==='DB'){ctx.fillStyle='#c0392b';ctx.fillRect(X-5,Y-5,10,10);}
