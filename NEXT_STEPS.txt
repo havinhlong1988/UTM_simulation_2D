@@ -1,0 +1,80 @@
+========================================================================
+UTM step-09 — NEXT STEPS (Mac <-> Linux relay handoff)
+========================================================================
+Plain-text checklist. Full detail: progress.md and ledger/README.md.
+
+STATE (as of last mac shift):
+  - Committed LOCALLY, NOT pushed yet:
+      b063284  ring same-lane gap metric fix (s_offset)
+      5b082f2  Phase-0 baseline + Mac/Linux relay ledger
+  - Phase 0 done. Frozen baseline: phase0/baseline_summary.json
+  - Next task in queue: handshake-baseline (STATE.json)
+
+------------------------------------------------------------------------
+STEP 1 — PUSH (on mac, once)
+------------------------------------------------------------------------
+  git push origin roundabout-corridor-tuning
+
+  Do NOT `git add -A` blindly: output/09_agent_sim_2d/ shows as modified,
+  but that is the OLD gridlocked run (not part of this work). Leave it, or:
+      git checkout -- output/09_agent_sim_2d/
+
+------------------------------------------------------------------------
+STEP 2 — LINUX SETUP (once)
+------------------------------------------------------------------------
+  git checkout roundabout-corridor-tuning
+  git pull origin roundabout-corridor-tuning
+
+  # recreate the conda env `utm` (env does NOT travel via git):
+  conda create -n utm python=3.11 numpy pandas matplotlib scipy -y
+  conda activate utm
+  # (add `pyvista imageio` only if you want the 3D view / GIF)
+
+------------------------------------------------------------------------
+STEP 3 — HANDSHAKE (on linux, first thing)
+------------------------------------------------------------------------
+  # confirm the machine reproduces the frozen baseline before trusting numbers
+  conda activate utm
+  bash ledger/tasks/handshake-baseline.sh        # expect: MATCH
+  # or drive it through the relay:
+  python ledger/relay.py                          # local only (no push)
+  python ledger/relay.py --push                   # commit + push the result
+
+------------------------------------------------------------------------
+STEP 4 — SCHEDULE (optional, for unattended runs)
+------------------------------------------------------------------------
+  Edit paths, then add to crontab (macOS has cron too). Windows make them
+  alternate; the baton prevents overlap.
+
+  # Linux (in-hours, weekdays 08-18):
+  */20 8-18 * * 1-5  cd /path/to/repo && /path/to/envs/utm/bin/python ledger/relay.py --push >> ledger/relay.log 2>&1
+
+  # Mac (out-of-hours + weekends):
+  */20 19-23,0-7 * * 1-5  cd /path/to/repo && /path/to/envs/utm/bin/python ledger/relay.py --push >> ledger/relay.log 2>&1
+  */20 * * * 6,0          cd /path/to/repo && /path/to/envs/utm/bin/python ledger/relay.py --push >> ledger/relay.log 2>&1
+
+------------------------------------------------------------------------
+STEP 5 — EACH SHIFT (either machine)
+------------------------------------------------------------------------
+  git pull
+  # in Claude Code:
+  /relay-resume
+  # -> reads ledger, reports state, does next task, journals, hands off.
+  # It ASKS before `git push`. Say yes to hand the baton to the other machine.
+
+------------------------------------------------------------------------
+AFTER HANDSHAKE PASSES -> PHASE 1
+------------------------------------------------------------------------
+  Confirm gate G1' (min_same_lane_gap_m >= 80 m; progress.md §5), then
+  implement + A/B (one param flag each, default off, vs frozen baseline):
+      phase1-A5-tolling   (system-optimum tolling)
+      phase1-A4-speed     (speed-control deconfliction)
+      phase1-A7-ring      (ring-entry metering; also lifts ring gap >= 80 m)
+  Flip each from "blocked" to "todo" in ledger/STATE.json as it is built.
+
+REMINDERS:
+  - Run the sim only via:  --param-file params/baseline_p0.params
+  - Never overwrite phase0/baseline_summary.json without re-running 5 seeds.
+  - ledger/LEDGER.md is append-only (never edit past blocks).
+  - Do not commit .claude/settings.local.json, __pycache__, ledger/relay.log.
+========================================================================
