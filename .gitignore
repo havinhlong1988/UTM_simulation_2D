@@ -15,7 +15,12 @@ env/
 Thumbs.db
 
 # Claude Code / agent workspace (large; nested worktrees, not project content)
-.claude/
+.claude/*
+# ...but DO track committed project skills so both machines share them (relay-resume):
+!.claude/skills/
+
+# relay driver log (local noise)
+ledger/relay.log
 
 # Generated pipeline outputs (reproducible by re-running scripts 01-10)
 # output/
