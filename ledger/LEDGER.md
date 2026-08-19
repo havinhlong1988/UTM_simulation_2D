@@ -82,3 +82,33 @@ untouched.
   car-following (drop the merge meter) or a smaller RING_METER_GAP_M, to isolate
   which half costs G3 and get the gap up without the battery cascade.
   Baton released (idle).
+
+## 2026-08-19T09:09:37+07:00 · host=linux · task=phase1-A7b-ring · KILL
+
+Isolation follow-up to A7: split RING_METER into two independent flags
+(RING_WRAP_FOLLOW = wrap-aware ring car-following; RING_MERGE_METER = metered ring
+merge; RING_METER now a master enabling both). A7b runs RING_WRAP_FOLLOW ALONE to
+test the hypothesis that the merge meter was the costly half.
+
+Hypothesis was WRONG. A7b (5-seed median) vs baseline / vs A7:
+- min_same_lane_gap_m  76.1  (min 65.8) ....... G1' FAIL (one seed never improved)
+- n_battery_dead       240   (vs A7 153, base 123) ... G3 FAIL, MUCH worse
+- total_hold_minutes   19948 (vs A7 16532, base 12772) ... worse
+- n_completed          760   (vs A7 847, base 877) ... worse
+- conflict_samples     5954 · n_reroutes 2016 ... worse
+
+Finding: the WRAP-AWARE CAR-FOLLOWING is the expensive half -- agents braking for
+cross-seam leaders around the whole ring cause far more holding (hover drain ->
+240 deaths, throughput collapse) than the merge meter did. And without the meter
+the gap target is NOT met. So neither half alone works; full A7 was the best ring
+variant and still KILL.
+
+CONCLUSION: enforcing >=80m ring circulation spacing is a DEAD END under this
+demand -- every variant fails a hard gate on battery (holds -> hover -> death).
+The binding constraint is peak_backlog=999 (launch backlog, progress.md §1),
+unchanged by all ring work. Pivot to demand-side: A5 tolling / A6 demand-capacity
+scheduling. Ring flags stay in, all default OFF (baseline untouched).
+
+- NEXT: **phase1-A5-tolling** (blocked; needs implementation) -- or promote
+  **phase2-A6-demand** (launch-slot scheduling) which attacks peak_backlog head-on.
+  Baton released (idle).

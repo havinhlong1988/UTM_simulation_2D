@@ -778,10 +778,17 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     # A7 RING METERING (default OFF -> baseline unchanged). The ring global
     # progress s_local+s_offset is not wrapped to the circumference, so spacing
     # can break at the 2*pi*r seam (an agent past the wrap sees no leader near
-    # angle 0). When on, ring-lane car-following and ring merges compare positions
-    # on the circle (mod ring_circ) so the headway holds across the seam, and a
-    # merge is metered to keep >= ring_meter_gap clear on BOTH sides of the entry.
+    # angle 0). Two INDEPENDENT halves, so their cost can be isolated:
+    #   RING_WRAP_FOLLOW -- ring car-following compares positions on the circle
+    #        (mod ring_circ) so the headway holds across the seam (the cheap fix).
+    #   RING_MERGE_METER -- a ring merge is additionally metered to keep
+    #        >= ring_meter_gap clear on BOTH sides of the entry angle (adds holds).
+    # RING_METER is a master switch turning BOTH on (the original A7 = KILL: the
+    # meter's entry holds drove hover-drain battery deaths past gate G3). A7b runs
+    # RING_WRAP_FOLLOW alone.
     ring_meter = bool(pget(params, "RING_METER", False))
+    ring_wrap_follow = ring_meter or bool(pget(params, "RING_WRAP_FOLLOW", False))
+    ring_merge_meter = ring_meter or bool(pget(params, "RING_MERGE_METER", False))
     # meter gap floor at ring entry; defaults to the same distance floor as legs.
     ring_meter_gap = float(pget(params, "RING_METER_GAP_M", sep_floor))
     # Dynamic (ACO-style) congestion cost: capturing a leg raises its routing
@@ -933,7 +940,7 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             # not at 0, so check for occupants just behind..ahead of that point.
             entry_g = seg.s_offset
             occg = occ.get(seg.res, ())
-            if ring_meter and seg.ring_circ > 0.0:
+            if ring_merge_meter and seg.ring_circ > 0.0:
                 # A7: meter the ring merge on the CIRCLE. Keep >= gap clear on both
                 # sides of the entry angle (wrap-aware), so no agent is injected
                 # inside the headway of one that has circulated past the seam.
@@ -1131,7 +1138,7 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             # bound, so subtract this seg's s_offset back out.
             if not flow_block and not a.is_patrol:
                 my_g = a.s_local + seg.s_offset
-                if ring_meter and seg.ring_circ > 0.0:
+                if ring_wrap_follow and seg.ring_circ > 0.0:
                     # A7: find the leader by smallest FORWARD gap around the circle,
                     # so an agent past the 2*pi*r seam still yields to the occupant
                     # near angle 0 ahead of it (fixes the wrap under-separation).

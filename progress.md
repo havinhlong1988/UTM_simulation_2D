@@ -144,6 +144,19 @@ FLOW_MODE=spacing. Machine copy: `phase0/baseline_summary.json`.
    merge meter). Files: `params/phase1_A7_ring.params`, `ledger/tasks/phase1-A7-ring.sh`,
    `phase1/A7/metrics/`.
 
+7. **A7b isolation — VERDICT KILL (worse than A7).** Split `RING_METER` into
+   `RING_WRAP_FOLLOW` (ring car-following) + `RING_MERGE_METER` (metered merge);
+   ran wrap-follow alone to test whether the meter was the costly half. It was
+   **not**: A7b gap 76.1 m median but **min 65.8 m (G1′ FAIL)**, `n_battery_dead`
+   **240** (G3 FAIL, far worse than A7's 153), completed 760, holds 19948.
+   Braking for cross-seam leaders around the whole ring holds agents more than the
+   merge meter did → hover-drain collapse. **Conclusion: enforcing ≥80 m ring
+   circulation spacing is a dead end under this demand — every variant fails a hard
+   gate on battery.** The binding constraint is unchanged: `peak_backlog=999`
+   (launch backlog, §1). **Pivot to demand-side (A5 tolling / A6 demand-capacity).**
+   Ring flags stay in, all default OFF. Files: `params/phase1_A7b_ring.params`,
+   `ledger/tasks/phase1-A7b-ring.sh`, `phase1/A7b/metrics/`.
+
 **Code change made:** exactly one — the same-lane-gap `s_offset` fix (measurement
 only; **no change to simulation dynamics**; `s_offset=0` for ordinary legs so their
 metric is unchanged). Verified: n_completed / conflict_samples / gridlock identical
@@ -202,9 +215,13 @@ incl. a `python-docx` venv used only to regenerate the `.docx`).
   (default OFF). Lifts ring gap **65.8 → 94.8 m** (G1′ PASS) but **G3 fails**
   (`n_battery_dead` 123 → 153: metering holds → hover drain) and holds +29%. Flag
   kept, default OFF; baseline unchanged. See §4.6.
-- **Next:** `phase1-A7b-ring` — retry with the **wrap-aware ring car-following
-  only** (drop the merge meter), or a smaller `RING_METER_GAP_M`, to lift the gap
-  without the battery cascade. Then `A5` (tolling) and `A4` (speed control).
+- **DONE — A7b isolation (VERDICT: KILL, worse than A7):** wrap-follow alone is
+  the expensive half and still misses G1′. **Ring-spacing enforcement is a dead
+  end here** (see §4.7). All ring flags default OFF.
+- **Next:** pivot to the demand side — the binding constraint is `peak_backlog=999`
+  (§1), untouched by ring work. Implement `phase1-A5-tolling` (system-optimum
+  tolling) and/or **promote `A6` demand-capacity launch-slot scheduling** (§2
+  Phase 2), which attacks the launch backlog directly.
 
 ---
 

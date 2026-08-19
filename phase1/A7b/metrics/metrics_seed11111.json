@@ -1,0 +1,139 @@
+{
+  "version": "v1",
+  "n_deliveries": 1000,
+  "n_patrols": 1,
+  "n_round_trips": 440,
+  "n_one_way": 405,
+  "n_contingency_backup": 104,
+  "n_contingency_return": 51,
+  "speed_classes_kmh": {
+    "60": 334,
+    "50": 344,
+    "30": 322
+  },
+  "n_completed": 771,
+  "n_battery_dead": 229,
+  "n_unfinished": 0,
+  "time_headway_s": 30.0,
+  "charge_power_w": 600.0,
+  "charge_target_pct": 0.9,
+  "min_dest_idle_s": 300.0,
+  "hold_penalty_m": 20000.0,
+  "mean_dock_charge_min": 7.990417801998183,
+  "n_dock_charges": 367,
+  "gridlock": false,
+  "flow_mode": "spacing",
+  "max_agents_on_a_lane": 7,
+  "min_same_lane_gap_m": 76.08936812349907,
+  "separation_respected": false,
+  "n_directed_leg_lanes": 162,
+  "routes_used": 24,
+  "routes_total": 24,
+  "merge_free_frac": 0.5,
+  "n_reroutes": 2016,
+  "n_agents_diverted": 832,
+  "max_simultaneous_agents": 150,
+  "peak_backlog": 999,
+  "patrol_sorties": 11,
+  "patrol_interval_min": 30.0,
+  "conflict_time_s": 5.0,
+  "conflict_samples": 5567,
+  "conflict_frames": 884,
+  "peak_simultaneous_conflicts": 16,
+  "cost_map_loaded": true,
+  "cost_map_min_slowness": 0.009999999776482582,
+  "mean_wait_for_leg_s": 7016.038,
+  "max_wait_for_leg_s": 15585.0,
+  "shift_hours": 1.0,
+  "sim_end_hours": 5.733333333333333,
+  "node_mutex_enabled": false,
+  "flight_levels": 6,
+  "launch_spacing_s": 2.0,
+  "reference_separation_m": 250.00000000000003,
+  "min_closest_approach_m": 0.0,
+  "peak_holding": 95,
+  "total_hold_events": 14471,
+  "total_hold_minutes": 19811.783333333333,
+  "mean_flight_time_s": 2184.201037613489,
+  "total_flown_km": 8779.263100886761,
+  "balance_routes": true,
+  "arrival_window_h": 0.0,
+  "deadline_all_finish_h": null,
+  "deadline_target_h": 1.0,
+  "deadline_table": [
+    {
+      "within_h": 1.0,
+      "done": 133,
+      "pct": 13.3
+    },
+    {
+      "within_h": 1.5,
+      "done": 209,
+      "pct": 20.9
+    },
+    {
+      "within_h": 2.0,
+      "done": 286,
+      "pct": 28.6
+    },
+    {
+      "within_h": 2.5,
+      "done": 366,
+      "pct": 36.6
+    },
+    {
+      "within_h": 3.0,
+      "done": 447,
+      "pct": 44.7
+    },
+    {
+      "within_h": 3.5,
+      "done": 538,
+      "pct": 53.8
+    },
+    {
+      "within_h": 4.0,
+      "done": 614,
+      "pct": 61.4
+    },
+    {
+      "within_h": 4.5,
+      "done": 685,
+      "pct": 68.5
+    },
+    {
+      "within_h": 5.0,
+      "done": 748,
+      "pct": 74.8
+    },
+    {
+      "within_h": 5.5,
+      "done": 765,
+      "pct": 76.5
+    },
+    {
+      "within_h": 6.0,
+      "done": 771,
+      "pct": 77.1
+    },
+    {
+      "within_h": 6.5,
+      "done": 771,
+      "pct": 77.1
+    }
+  ],
+  "energy_hover_w": 220.0,
+  "energy_drag_coef": 0.05,
+  "battery_wh": 200.0,
+  "energy_optimal_kmh": 46.8,
+  "energy_total_kwh": 91.11218723333766,
+  "energy_deliveries_kwh": 89.33637152598777,
+  "energy_patrol_kwh": 1.7758157073498884,
+  "energy_mean_wh_per_mission": 115.87078018934865,
+  "energy_wh_by_class": {
+    "60": 116.08,
+    "30": 110.18,
+    "50": 121.65
+  },
+  "missions_over_battery": 88
+}
