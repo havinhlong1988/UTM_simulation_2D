@@ -207,6 +207,24 @@ FLOW_MODE=spacing. Machine copy: `phase0/baseline_summary.json`.
    agents (conflicts +13%, G3 fails); 2.0 far worse. Flag default OFF. Files:
    `params/phase3_A4_speed.params`, `ledger/tasks/phase3-A4-speed.sh`, `phase3/A4/metrics/`.
 
+11. **A1 space-time reservation routing — VERDICT NOT-VIABLE (does not scale).**
+   Implemented SIPP-lite behind `RESV_ROUTING` (default OFF; `baseline_p1` verified
+   **byte-identical** with the flag off): `plan_route` gains a time-aware Dijkstra
+   that books each mission's predicted transit windows and penalizes routing onto
+   legs booked beyond capacity during the agent's own window. **But wall time
+   blows up super-linearly** — N=100 19.5 s, N=200 >90 s timeout (baseline 10 s),
+   N=1000 infeasible — even after book-only-on-out/return, a horizon cap, and
+   lazy per-leg pruning. **Root cause: architecture mismatch** — a reservation
+   *plan* on a *reactive* time-stepped executor. The sim doesn't execute the
+   schedule (agents car-follow / hold / get stuck on live congestion the plan
+   didn't model), so execution diverges → agents stall → STUCK_TIMEOUT reroute →
+   each reroute is a full time-aware replan → the reroute rate feeds back and wall
+   time explodes with N. And routing isn't the binding constraint anyway (A5 was
+   NEUTRAL; `peak_backlog` is launch-bound). **Not A/B'd.** Scaffold kept, flag OFF.
+   To make it real: *execute* the reservation schedule (speed/launch honor
+   bookings) or add agent-tagged reservation lifecycle + reservation-aware launch
+   metering — a much larger build. Files: `params/phase3_A1_resv.params`.
+
 **Code change made:** exactly one — the same-lane-gap `s_offset` fix (measurement
 only; **no change to simulation dynamics**; `s_offset=0` for ordinary legs so their
 metric is unchanged). Verified: n_completed / conflict_samples / gridlock identical
@@ -284,11 +302,15 @@ incl. a `python-docx` venv used only to regenerate the `.docx`).
 - **DONE — A4 speed control (VERDICT: KEEP):** recovers ~24% of DCB's makespan add
   (6.22→5.96 h) and cuts holds −38%, all hard gates pass; mean_wait stays
   launch-bound (§4.10). `SPEED_CONTROL`, band 0.5, default OFF.
+- **DONE — A1 space-time reservation (VERDICT: NOT-VIABLE):** doesn't scale on this
+  reactive executor (§4.11); flag kept OFF, baseline byte-identical.
 - **Next options:**
   1. **Promote `baseline_p1` + A4 → `baseline_p2`** (new frozen reference), if you
-     want the makespan gain baked into the baseline for phase-3+ A/Bs.
-  2. **A1 space-time reservation / SIPP** (doc #1) — the larger structural rewrite,
-     foundational for A2/A3 (CBS/PBS).
+     want the makespan gain baked into the baseline.
+  2. **Stop the A-series** — A6 (`baseline_p1`) + A4 are the wins; A2/A3 (CBS/PBS)
+     would hit the same reactive-vs-planned mismatch as A1. Write up results.
+  3. **Proper A1 redesign** (bigger build): make the executor *honor* reservations
+     (schedule-following), not just route by them.
 
 ---
 

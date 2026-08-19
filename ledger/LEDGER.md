@@ -280,3 +280,41 @@ recovery goal is met. Only blemish n_reroutes +11%. mean_wait stays launch-bound
 
 - NEXT: **promote-baseline-p2** (optional, awaiting user OK) -- freeze baseline_p1
   + A4 as baseline_p2. Then A1 space-time reservation (doc #1). Baton idle.
+
+## 2026-08-19T11:57:36+07:00 · host=linux · task=phase3-A1-sipp · NOT-VIABLE
+
+Implemented A1 space-time reservation routing (SIPP-lite) behind `RESV_ROUTING`
+(default OFF; baseline_p1 verified BYTE-IDENTICAL with flag off). plan_route gains
+a time-aware Dijkstra: track predicted arrival time per node, charge resv_penalty
+when an edge's predicted transit window overlaps others booked beyond the leg's
+capacity; the mission's out/return plans book their windows (horizon-capped),
+reroutes query but do not book. Helpers: leg_resv table, _resv_overlap
+(prune-on-access), leg_capacity.
+
+DOES NOT SCALE -> not A/B'd. Wall time vs baseline (seed 12345):
+  N=50   3.0s (baseline ~1s)   completed 49  reroutes 2
+  N=100  19.5s (baseline ~5s)  completed 95  reroutes 53
+  N=200  >90s TIMEOUT (baseline 10s)
+  N=1000 (the protocol) infeasible.
+Super-linear blowup persists after: book-only-on-out/return (reroutes don't
+book), horizon cap (300s and 1800s both), and per-leg lazy pruning. leg_seg is
+cached (not the cost).
+
+ROOT CAUSE (architecture mismatch): A1 is a reservation PLAN bolted onto a
+REACTIVE time-stepped executor. The reactive sim does NOT execute the schedule
+(agents car-follow, hold, and get stuck by live congestion the plan didn't
+model), so execution diverges from the booking -> agents stall -> STUCK_TIMEOUT
+reroute -> each reroute is a full time-aware replan -> the reroute rate feeds back
+and wall time explodes with N. Also: routing is NOT the binding constraint here
+(A5 tolling was NEUTRAL; peak_backlog=999 is launch-bound), so even a fast A1
+would likely not move throughput.
+
+DECISION: A1 as full SIPP is not worth forcing in this executor. To make it real
+you would either (a) EXECUTE the reservation schedule (speed/launch times honor
+bookings) instead of only routing by it, or (b) add agent-tagged reservation
+lifecycle + reservation-aware launch metering -- a much larger build. Scaffold
+kept, flag default OFF (baseline safe), for a possible future proper design.
+
+- NEXT: recommend stopping the A-series here -- A6 (baseline_p1) + A4 are the
+  wins; A2/A3 (CBS/PBS) would hit the same reactive-vs-planned mismatch. Await
+  user steer. Baton idle.

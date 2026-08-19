@@ -1,0 +1,235 @@
+# ======================================================================
+# Multi-agent 2D corridor traffic simulation (09_simulate_agents_2d.py)
+# ======================================================================
+# A fleet of UAV agents flies missions between the DB (depot) and DK
+# (delivery) objectives on the two-lane corridor network from step 07,
+# plus continuous city-monitoring PATROLS that loop around the map.
+#
+# Occupancy rule -- ONE AGENT PER LEG-BLOCK:
+#   * each directed leg-lane is a block that holds at most ONE agent at a
+#     time ("same leg cannot be captured by two agents"); the reverse
+#     lane of a corridor is a separate block (direction can differ);
+#   * an origin may launch MANY agents at once, as long as they take
+#     different first legs (different paths);
+#   * there is NO global concurrency cap, so the observed peak concurrent
+#     count is the network's true simultaneous-agent capacity;
+#   * demand arrives uniformly over SHIFT_HOURS; excess queues as backlog.
+# ----------------------------------------------------------------------
+
+# Input / output ------------------------------------------------------
+CORRIDOR_DIR = "output/07_corridor_network"
+OUTPUT_DIR      = "output/09_phase3_A1_resv"
+# Slowness cost-map from 08_generate_costmap.py (true velocity = slowness x
+# base speed). If the file is absent, base speeds are used.
+COST_MAP_FILE = "output/08_costmap/slowness_costmap.npz"
+# Planning-model .xyz grid from step 02 (has obstacle_flag / ra_flag); its
+# obstacles + no-fly (RA) cells are overlaid on 00_network_traffic.png. Absent
+# -> no overlay.
+OBSTACLE_MODEL_FILE = "output/02_thetastar_master_plan/planning_model_with_flz_support.xyz"
+
+# Fleet ---------------------------------------------------------------
+N_AGENTS        = 1000       # total delivery missions (demand)
+SHIFT_HOURS     = 1.0        # nominal target window (deadline search starts here)
+ARRIVAL_WINDOW_H = 0.0       # demand injected over this span; 0 -> all ready at t=0
+BALANCE_ROUTES  = True       # cycle missions round-robin over ALL routes (use them
+                             #   all at once) instead of random endpoints
+MAX_CONCURRENT  = 150        # meter airborne agents to this many (lower -> fewer
+                             #   simultaneous crossings/conflicts, longer makespan).
+LAUNCH_SPACING_S = 2.0       # min seconds between successive delivery launches, so
+                             #   departures are spread in time (fewer conflicts).
+ROUND_TRIP_PROB = 0.5        # P(non-contingency mission is a round trip)
+SIM_SEED        = 12345      # RNG seed for reproducible fleets
+
+# Deadline search: smallest window in which ALL deliveries finish -------
+DEADLINE_START_H = 1.0       # target (force all to finish within this)
+DEADLINE_STEP_H  = 0.5       # if not, extend the window by this each step
+
+# Drone energy + battery: P(v) = HOVER_POWER_W + DRAG_POWER_COEF * v^3 ---
+HOVER_POWER_W   = 220.0      # hover / induced power floor (W); also drain while holding
+DRAG_POWER_COEF = 0.050      # parasitic term (W per (m/s)^3); sets optimal speed
+BATTERY_WH      = 200.0      # usable battery energy per drone (Wh)
+START_BATTERY_PCT = 1.0      # battery charge at first launch
+# Dock charging: at each dock the drone recharges; it may only depart again
+# once it reaches CHARGE_TARGET_PCT. Charge time = (target - level)/CHARGE_POWER.
+CHARGE_POWER_W    = 600.0    # charge rate (W)  -> ~20 min for a full 200 Wh pack
+CHARGE_TARGET_PCT = 0.9      # must reach 90% battery before leaving a dock
+
+# UAV speed classes ---------------------------------------------------
+SPEED_CLASSES_KMH   = [60.0, 50.0, 30.0]   # 3 UAV classes
+SPEED_CLASS_WEIGHTS = [1.0, 1.0, 1.0]      # selection weights (normalised)
+
+# Route-aware priority ------------------------------------------------
+# Missions whose ORIGIN or DEST is one of these objective labels are
+# prioritised: exempted from the inner/outer ZONE_BIAS_M steering (they take
+# the DIRECT spine), given launch/merge precedence, and (if PRIORITY_FORCE_SPEED)
+# forced to PRIORITY_SPEED_KMH. The DB01 hub is the network's congestion
+# bottleneck (its egress legs DB01-MIN005 / DB01-MIN003 carry ~72% of all
+# holding delay and ~90% of battery deaths).
+#
+# EMPIRICAL FINDING (seed 12345, 1000 agents) -- prioritising DB01 traffic does
+# NOT improve on-time throughput and in fact HURTS it:
+#     config              done  batt_dead  @1h%  @3h%  @5h%  end_h
+#     baseline (OFF)      902   98         17.9  59.7  87.6  6.3
+#     DB01 force 60km/h   916   84          8.6  38.9  82.0  9.5
+#     DB01 access+precede 860  140          7.2  38.5  83.4  5.9
+# Cause: separation is a TIME headway, so a leg's throughput = 1/headway is
+# INDEPENDENT of speed; "travel faster" cannot add bottleneck capacity, and
+# forcing priority traffic fast only lowers lane density (more spacing) while
+# front-loading the launch queue with bottleneck-bound agents starves the
+# spare-capacity outer routes.
+# The one upside of force-60: fewer battery deaths (98->84) and less energy
+# (90.9->80.5 kWh), because faster transit cuts hover-time during holds.
+#
+# NOTE: adding a 3rd DB01 egress corridor was TESTED and also did NOT help
+# (DB01->MAJ007 890/206-dead; DB01->MAJ012 890/110-dead vs baseline 902/98).
+# DB01 sits in the high-risk map core -- every southbound corridor has mean
+# slowness 0.2-0.5, so any added leg is inherently slow to fly, and the step-09
+# router plans on GEOMETRIC LENGTH (risk-blind) so it over-uses the short-but-
+# risky new leg. The binding limit is the launch backlog (peak 999, ~103 min
+# wait): 1000 missions at t=0 vs ~150 concurrent low-risk-airspace capacity.
+# Effective fixes = RISK-AWARE routing (cost=length/slowness; cf. step 11 FMM
+# planner) + DEMAND SMOOTHING (ARRIVAL_WINDOW_H>0), NOT more corridors.
+#
+# Left OFF by default (empty list) so the canonical pipeline is not degraded.
+PRIORITY_ORIGIN_LABELS = []                # e.g. ["DB01"] to prioritise DB01 traffic
+PRIORITY_FORCE_SPEED   = True              # force priority missions to PRIORITY_SPEED_KMH
+PRIORITY_SPEED_KMH     = 60.0              # speed class forced on priority missions
+
+# City-monitoring patrols ---------------------------------------------
+# One patrol sortie takes off every PATROL_INTERVAL_MIN minutes and flies
+# PATROL_LAPS loop(s) of the map perimeter, then lands.
+# A SINGLE patrol unit departs the drone base, flies one perimeter loop, lands,
+# and re-launches every PATROL_INTERVAL_MIN (one physical drone -- never two
+# airborne at once). It holds the highest priority and, with PATROL_AS_OBSTACLE,
+# is treated by deliveries as a moving obstacle they keep clear of / behind.
+PATROL_INTERVAL_MIN = 30.0   # the patrol unit re-launches every 30 minutes
+PATROL_LAPS         = 1      # perimeter loops per sortie
+PATROL_SPEED_KMH    = 50.0   # patrol cruise speed
+PATROL_AS_OBSTACLE  = True   # deliveries yield to / space behind the patrol
+
+# RIGHT-HAND TRAFFIC on roundabout rings (only active when RING_TRAVEL is on):
+# every agent circulates counter-clockwise once inside a ring, so nobody cuts
+# across the wrong way. Off -> legacy shorter-arc rule.
+RING_RIGHT_HAND     = True
+
+# Contingencies -------------------------------------------------------
+# A fraction of trips hit a "false condition" mid-outbound and must
+# either REROUTE via a backup corridor to the destination, or RETURN TO
+# BASE (fly back to the origin). Split controlled by BACKUP_FRACTION.
+CONTINGENCY_PROB = 0.15      # 15% of trips hit a "false condition"
+BACKUP_FRACTION  = 0.667     # of the 15%: ~10% reroute to dest (no return),
+                             #   ~5% return to base (0.667*15=10, 0.333*15=5)
+
+# Endpoints -----------------------------------------------------------
+DB_PREFIX = "DB"
+DK_PREFIX = "DK"
+
+# Flight dynamics -----------------------------------------------------
+SERVICE_TIME_S = 60.0         # dwell at the far end before a round-trip return
+# After arriving at the destination (round trips), the agent must idle at the
+# dock at least this long (charge / reload) before flying the return leg.
+MIN_DEST_IDLE_S = 300.0       # >= 5 minutes
+
+# Deconfliction -------------------------------------------------------
+# FLOW_MODE controls lane occupancy:
+#   "spacing" -- many agents per lane, each kept >= SEPARATION_M behind the
+#                one ahead (car-following). Deadlock-free: the fleet always
+#                drains, so completion-time / energy studies are meaningful.
+#   "block"   -- strict ONE agent per leg-lane. Matches "same leg cannot be
+#                captured by two agents", but gridlocks under heavy load
+#                (circular waits at junctions), so most missions never finish.
+FLOW_MODE      = "spacing"
+# Separation is a TIME headway: an agent stays >= TIME_HEADWAY_S seconds behind
+# the one ahead, so the distance gap scales with speed (30 s = 500 m at 60 km/h,
+# 250 m at 30 km/h). SEPARATION_M is only a lower-bound floor.
+TIME_HEADWAY_S = 30.0
+SEPARATION_M   = 80.0         # distance floor (m) under the time headway
+# A CONFLICT (marked with a red star) is a near-miss between agents on
+# DIFFERENT corridors: they come within CONFLICT_TIME_S seconds of impact
+# (distance below CONFLICT_TIME_S * the faster agent's speed). 5 s ~= 80 m
+# at cruise, matching the "80 m ~ 5.6 s to impact" reference.
+CONFLICT_TIME_S = 5.0
+# MERGE rule: a new agent may merge onto a lane only if the nearest agent
+# already on it is at least this fraction of the leg length ahead (that much
+# of the leg free), never closer than SEPARATION_M. The lane is "locked" to
+# new entries until its occupant clears that much of it; if no lane is free
+# the agent waits. Spreads traffic across more lanes/routes.
+MERGE_FREE_FRAC = 0.5
+
+# Dynamic ACO-style routing ------------------------------------------
+# Routes are planned at launch by least-cost search over the network,
+# with a congestion "pheromone": capturing a leg adds CAPTURE_COST_M to
+# its routing cost; that penalty decays to 0 as the occupant passes the
+# half-way point of the leg. So the next agent routes AROUND captured
+# legs (onto longer paths). ZONE_BIAS_M steers the fastest class to the
+# OUTER corridors and the slowest to the shorter INNER ones.
+CAPTURE_COST_M = 3000.0       # cost a freshly-captured leg adds (metres-equiv)
+ZONE_BIAS_M    = 2000.0       # inner/outer steering strength by speed class
+# HIGH penalty added to a leg while an occupant is HOLDING/WAITING on it, so the
+# router sends following agents around the jam instead of queueing behind it.
+HOLD_PENALTY_M = 20000.0
+# Flight-level (altitude) separation --------------------------------
+# Each leg gets a level from its travel HEADING (semicircular-rule style), so
+# crossing / opposing traffic is vertically separated. Two agents only CONFLICT
+# when horizontally close AND on the SAME level; the node mutex likewise only
+# serialises same-level agents. FLIGHT_LEVELS bands = 360/FLIGHT_LEVELS deg each.
+FLIGHT_LEVELS = 6             # number of altitude bands (>=2 splits opposing dirs;
+                              #   6 ~halves conflicts vs 4 at no throughput cost)
+LEVEL_SEP_M   = 30.0          # vertical spacing between bands (for reporting/3D)
+BASE_LEVEL_M  = 60.0          # altitude of the lowest band (m)
+
+# Junction (node) mutex, keyed by (node, LEVEL): forbids two SAME-LEVEL agents
+# inside a junction zone at once. WARNING: at these zone sizes it GRIDLOCKS this
+# network under 1000-agent load (circular waits at hubs -> only ~1% finish), so
+# it is left OFF -- flight levels + metering already cut conflicts ~78% without
+# any throughput loss. Enable only with much smaller zones / lighter load.
+NODE_MUTEX_ENABLE = False
+NODE_APPROACH_M      = 20.0   # node-mutex zone at traffic nodes (if enabled)
+OBJECTIVE_APPROACH_M = 50.0   # node-mutex zone at DB/DK hubs (if enabled)
+
+# Time stepping -------------------------------------------------------
+DT_S              = 1.0       # simulation step
+HORIZON_FACTOR    = 80.0      # cap sim time at SHIFT * factor; large so the run fully
+                              #   drains all missions (ends early when all complete)
+GRIDLOCK_TIMEOUT_S = 300.0    # if nothing moves this long -> declare gridlock & stop
+STUCK_TIMEOUT_S    = 180.0    # if an agent is blocked this long at a node, it diverts
+                              #   via an alternate corridor (breaks spillback deadlocks)
+
+# Outputs -------------------------------------------------------------
+SAMPLE_EVERY_S   = 20.0       # record a timeline/animation frame this often (finer
+                              #   sampling + HTML lerp between frames -> smoother motion)
+MAX_GIF_FRAMES   = 360        # subsample frames down to at most this many
+GIF_FPS          = 20
+MAKE_HTML       = False  # self-contained interactive 2D agents_animation.html
+# Per-agent route replays under output/09_agent_sim_2d/agent_route/ (one HTML per
+# agent + index.html) to inspect each agent's travel. MAX = -1 -> all agents.
+MAKE_AGENT_ROUTE_HTML = False
+AGENT_ROUTE_MAX           = -1
+AGENT_ROUTE_INCLUDE_PATROL = False
+MAKE_ANIMATION  = False  # matplotlib agents_animation.gif
+WRITE_TRAJECTORY = False  # downsampled trajectories.csv
+
+# PyVista 3D view -----------------------------------------------------
+MAKE_PYVISTA    = False  # 3D scene: movie + interactive HTML + PNG
+PYVISTA_MAX_FRAMES = 300       # subsample frames for the 3D movie
+PYVISTA_Z_OUTBOUND = 60.0      # altitude (m) of outbound (to-DK) agents
+PYVISTA_Z_INBOUND  = 100.0     # altitude (m) of inbound (to-DB) agents
+PYVISTA_Z_PATROL   = 140.0     # altitude (m) of patrol agents
+
+# ---- Phase-0 baseline overrides (D1) : mutex OFF, ring one-way ON ----
+RING_TRAVEL     = True
+
+# ---- baseline_p1: Phase-0 baseline + A6 demand-capacity balancing (KEEP) ----
+# New frozen baseline as of 2026-08-19: DCB_MODE ON at the sweep efficiency knee
+# (share=1.5). vs baseline_p0 (5-seed median): completed +5.4%, holds -13%,
+# battery_dead -38%, at mean_wait +5.5% / makespan +21% (6.22h, within shift).
+# Phase-3+ improvements A/B against THIS, not baseline_p0. A6 is the only delta.
+DCB_MODE            = True
+DCB_CORRIDOR_SHARE  = 1.5
+
+# ---- Phase-3 A1: space-time reservation routing (A/B vs baseline_p1) ----
+# Replaces myopic ACO leg_penalty with a reservation table: agents route around
+# PREDICTED future congestion (booked transit windows), not just current. Only
+# these lines differ from baseline_p1 (RESV_ROUTING is OFF by default in code).
+RESV_ROUTING   = True
+RESV_PENALTY_M = 8000.0

@@ -851,6 +851,47 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     node_busy: dict[str, Agent] = {}   # node -> transiting agent (optional mutex)
     occ: dict = {}                     # spacing mode: res -> [(s_local, agent), ...]
     leg_penalty: dict = {}             # res -> extra routing cost from capture
+    # A1 SPACE-TIME RESERVATION ROUTING (default OFF -> baseline unchanged). The
+    # ACO leg_penalty above is MYOPIC: it charges the CURRENT occupancy of a leg,
+    # so an agent routes around legs busy NOW, not legs that will be busy WHEN IT
+    # ARRIVES. A1 replaces it with a reservation table: each planned agent books
+    # the future time window it expects to occupy each leg (from its speed), and a
+    # new plan pays resv_penalty for booking a leg beyond its capacity during its
+    # own transit window -- so routes deconflict in space-TIME (SIPP-lite).
+    # Reservations past the current time are pruned. Static zone_cost still applies.
+    resv_routing = bool(pget(params, "RESV_ROUTING", False))
+    resv_penalty = float(pget(params, "RESV_PENALTY_M", 8000.0))
+    # only book/consider reservations up to this far ahead: near-term congestion is
+    # what routing can act on, and this bounds each leg's window list (and cost).
+    resv_horizon = float(pget(params, "RESV_HORIZON_S", 1800.0))
+    leg_resv: dict = {}                # res -> [(t_enter, t_exit), ...] booked windows
+    leg_cap_cache: dict = {}           # res -> concurrent-agent capacity (cached)
+
+    def leg_capacity(res, L):
+        c = leg_cap_cache.get(res)
+        if c is None:
+            c = max(1, int(L / sep)); leg_cap_cache[res] = c   # sep ~ nominal headway gap
+        return c
+
+    def _resv_overlap(res, a0, a1, t0):
+        # count booked windows overlapping [a0, a1], and prune THIS leg's stale
+        # (already-past) windows in the same pass so lists stay bounded. A global
+        # prune every call is far too slow; past windows can't overlap a future
+        # transit anyway (their exit < t0 <= a0), so dropping them lazily is exact.
+        lst = leg_resv.get(res)
+        if not lst:
+            return 0
+        keep = []
+        n = 0
+        for iv in lst:
+            if iv[1] < t0:
+                continue
+            keep.append(iv)
+            if iv[0] < a1 and a0 < iv[1]:
+                n += 1
+        leg_resv[res] = keep
+        return n
+
     outerness = net.leg_outerness
 
     def zone_cost(lg, a):
@@ -881,13 +922,61 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     def agent_level(a) -> int:
         return leg_level(a.cur_seg())
 
-    def plan_route(src, dst, a, blocked=None):
+    def plan_route(src, dst, a, blocked=None, book=False):
         """Least-cost directed leg path src->dst by Dijkstra over dynamic
         edge cost = length + capture penalty + speed/zone bias. Returns
         (pairs, nodes) or None. This is the ACO-style stigmergic routing:
-        captured legs carry a cost 'pheromone' that others route around."""
+        captured legs carry a cost 'pheromone' that others route around.
+
+        A1 (resv_routing): a time-aware variant that plans over a space-time
+        reservation table and books the chosen route's predicted occupancy."""
         import heapq
         blocked = blocked or set()
+        if resv_routing:
+            t0 = t                                 # closure: current sim time
+            v_a = max(a.speed, 1e-3)               # m/s used to predict transit times
+            dist = {src: 0.0}
+            tarr = {src: t0}                       # predicted arrival time along best path
+            prev: dict = {}
+            pq = [(0.0, src)]
+            while pq:
+                d, u = heapq.heappop(pq)
+                if u == dst:
+                    break
+                if d > dist.get(u, np.inf):
+                    continue
+                for (v, lg, fwd, L) in net._adj[u]:
+                    if lg in blocked:
+                        continue
+                    res = net.leg_seg(lg, fwd).res
+                    enter = tarr[u]; exitt = enter + L / v_a
+                    over = _resv_overlap(res, enter, exitt, t0) - leg_capacity(res, L) + 1
+                    pen = resv_penalty * over if over > 0 else 0.0
+                    nd = d + L + zone_cost(lg, a) + pen
+                    if nd < dist.get(v, np.inf):
+                        dist[v] = nd; tarr[v] = exitt; prev[v] = (u, lg, fwd)
+                        heapq.heappush(pq, (nd, v))
+            if dst != src and dst not in prev:
+                return None
+            pairs, nodes = [], [dst]; cur = dst
+            while cur != src:
+                u, lg, fwd = prev[cur]; pairs.append((lg, fwd)); nodes.append(u); cur = u
+            pairs.reverse(); nodes.reverse()
+            # book this route's predicted occupancy (only within the horizon, so
+            # each leg's window list stays short) so later plans deconflict from it.
+            # Only the mission's primary out/return plans book -- reroutes/backups
+            # query the table but do NOT add to it, else replans compound bookings
+            # into a runaway loop (table -> penalty -> more reroutes -> more books).
+            if book:
+                tacc = t0
+                t_cap = t0 + resv_horizon
+                for (lg, fwd) in pairs:
+                    if tacc >= t_cap:
+                        break
+                    seg = net.leg_seg(lg, fwd)
+                    nxt = tacc + seg.length / v_a
+                    leg_resv.setdefault(seg.res, []).append((tacc, nxt)); tacc = nxt
+            return pairs, nodes
         dist = {src: 0.0}
         prev: dict = {}
         pq = [(0.0, src)]
@@ -918,7 +1007,7 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     def plan_mission(a) -> bool:
         """Build a's route now, cost-aware. Handles round trips (out + dwell
         + return) and contingencies (backup reroute / return-to-base)."""
-        rp = plan_route(a.origin, a.dest, a)
+        rp = plan_route(a.origin, a.dest, a, book=True)
         if rp is None:
             return False
         pairs, nodes = rp
@@ -948,7 +1037,7 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             a.kinds = ["leg"] * len(a.segs)
             a.outbound_upto = len(a.segs)
             if a.round_trip:
-                ret = plan_route(a.dest, a.origin, a)
+                ret = plan_route(a.dest, a.origin, a, book=True)
                 if ret is not None:
                     ret_segs = list(net.route_segs(ret[0]))
                     a.segs.append(None); a.kinds.append("dwell")
