@@ -83,6 +83,12 @@ Full write-up with 17 citations: `docs/coordination_algorithm_improvements.docx`
 Config: N=1000, mutex OFF, ring one-way ON, `ARRIVAL_WINDOW_H=0`, `MAX_CONCURRENT=150`,
 FLOW_MODE=spacing. Machine copy: `phase0/baseline_summary.json`.
 
+> **Current reference is now `baseline_p1`** (Phase-0 + A6 DCB, share=1.5;
+> `baseline_p1/baseline_summary.json`): completed 924, holds 11162 min, deaths 76,
+> conflicts 4082, makespan 6.22 h, @5h 88.2%. **Phase-3+ improvements A/B against
+> `baseline_p1`**, not the table below. `baseline_p0` (below) remains the frozen
+> env-parity handshake reference.
+
 | Family | Metric | Baseline (median · min..max) |
 |--------|--------|------------------------------|
 | Safety | `min_same_lane_gap_m` (fixed) | **65.8** (57.5..78.2) — sub-80m floor at ring entry |
@@ -256,12 +262,17 @@ incl. a `python-docx` venv used only to regenerate the `.docx`).
   intervention that clears the bar — completions +8%, holds −28.8%, deaths −57%,
   conflicts −12.7%, reroutes −30% — at a latency cost (mean_wait +25%, makespan
   +45%). See §4.9. `DCB_MODE`, default OFF; A6 config is a candidate new baseline.
-- **Next options:**
-  1. **Promote the A6 config to a new frozen baseline** and re-run the 5-seed
-     freeze, so phase-3+ A/Bs measure against DCB-on.
-  2. **`phase1-A4-speed`** (speed control) — smooth stop-and-go to try to recover
-     some of A6's makespan/wait cost; best tested **stacked on A6**.
-  3. **A1 space-time reservation** (doc #1) — the larger structural rewrite.
+- **DONE — A6 share sweep + baseline promotion.** Swept `DCB_CORRIDOR_SHARE`
+  {0.75, 1.0, 1.25, 1.5} (5 seeds each): monotone throughput↔latency curve.
+  `0.75` is safety-max (−76% deaths!) but makespan 8.67 h **exceeds an ~8 h shift**.
+  Chose **share=1.5 (efficiency knee)** — most benefit per latency cost, makespan
+  6.22 h. **Promoted to new frozen baseline `baseline_p1`** = baseline_p0 + DCB
+  (`params/baseline_p1.params`, `baseline_p1/`). Phase-3+ A/Bs measure against
+  `baseline_p1`; `baseline_p0` stays the env-parity handshake reference.
+- **Next options (A/B against `baseline_p1`):**
+  1. **`phase1-A4-speed`** (speed control) — smooth stop-and-go to claw back some
+     of A6's makespan/wait cost (DCB already on in baseline_p1).
+  2. **A1 space-time reservation** (doc #1) — the larger structural rewrite.
 
 ---
 

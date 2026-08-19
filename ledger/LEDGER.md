@@ -188,3 +188,29 @@ mean_wait +5.5%) -- a lower-latency alternative; share=2.5 reverts to baseline
   best tested STACKED on A6 to try to recover some of the makespan/wait cost.
   Also: consider promoting the A6 config to a new frozen baseline for phase-3+.
   Baton released (idle).
+
+## 2026-08-19T10:15:40+07:00 · host=linux · task=promote-baseline-p1 · NOTE
+
+A6 share sweep + baseline promotion (user-chosen operating point).
+
+DCB_CORRIDOR_SHARE sweep (5 seeds each, median vs baseline_p0):
+  share  completed  hold_min  dead  conflict  mwait  makespan
+  0.75      970(+11%)  6873(-46%)  30(-76%)  3246   8989   8.67h(+69%)
+  1.0       947(+8%)   9093(-29%)  53(-57%)  3497   7664   7.43h(+45%)
+  1.25      919(+5%)  10462(-18%)  81(-34%)  3811   6907   6.68h(+30%)
+  1.5       924(+5%)  11162(-13%)  76(-38%)  4082   6455   6.22h(+21%)
+Monotone throughput<->latency tradeoff. 1.25 is dominated by 1.5 (seed noise).
+0.75 is safety-max (-76% deaths!) but makespan 8.67h EXCEEDS an ~8h shift.
+
+CHOSEN: share=1.5 (efficiency knee) -- most benefit per latency cost, makespan
+6.22h safely within shift. Locked into params/phase2_A6_dcb.params.
+
+FROZEN new baseline **baseline_p1** = baseline_p0 + DCB_MODE (share=1.5):
+  params/baseline_p1.params ; baseline_p1/run_seeds.sh + aggregate.py +
+  baseline_summary.json + metrics/. 5-seed frozen medians: completed 924,
+  hold 11162min, battery_dead 76, conflict 4082, mean_wait 6455s, makespan 6.22h,
+  @5h 88.2%, gridlock False, routes 24/24. Phase-3+ improvements A/B against
+  baseline_p1. baseline_p0 remains the env-parity handshake reference (unchanged).
+
+- NEXT: **phase1-A4-speed** (blocked) -- speed control vs baseline_p1 (DCB already
+  on), to smooth stop-and-go and claw back some makespan/wait. Baton released (idle).

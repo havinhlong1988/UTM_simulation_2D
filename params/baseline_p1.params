@@ -18,7 +18,7 @@
 
 # Input / output ------------------------------------------------------
 CORRIDOR_DIR = "output/07_corridor_network"
-OUTPUT_DIR      = "output/09_phase2_A6_dcb"
+OUTPUT_DIR      = "output/09_baseline_p1"
 # Slowness cost-map from 08_generate_costmap.py (true velocity = slowness x
 # base speed). If the file is absent, base speeds are used.
 COST_MAP_FILE = "output/08_costmap/slowness_costmap.npz"
@@ -219,11 +219,10 @@ PYVISTA_Z_PATROL   = 140.0     # altitude (m) of patrol agents
 # ---- Phase-0 baseline overrides (D1) : mutex OFF, ring one-way ON ----
 RING_TRAVEL     = True
 
-# ---- Phase-2 A6: demand-capacity balancing (A/B vs baseline_p0) ----
-# Meters launches per ORIGIN corridor to a fair-share airborne cap and
-# round-robins deferred candidates, spreading the fleet across corridors instead
-# of draining one corridor's backlog first. DCB_MODE is OFF by default in the
-# code, so ONLY these lines separate A6 from the frozen Phase-0 baseline.
+# ---- baseline_p1: Phase-0 baseline + A6 demand-capacity balancing (KEEP) ----
+# New frozen baseline as of 2026-08-19: DCB_MODE ON at the sweep efficiency knee
+# (share=1.5). vs baseline_p0 (5-seed median): completed +5.4%, holds -13%,
+# battery_dead -38%, at mean_wait +5.5% / makespan +21% (6.22h, within shift).
+# Phase-3+ improvements A/B against THIS, not baseline_p0. A6 is the only delta.
 DCB_MODE            = True
-DCB_CORRIDOR_SHARE  = 1.5      # efficiency knee (5-seed sweep): -38% deaths, +5.4% completed, makespan 6.22h
-# DCB_CORRIDOR_CAP  = 0        # >0 overrides the derived cap with an absolute one
+DCB_CORRIDOR_SHARE  = 1.5
