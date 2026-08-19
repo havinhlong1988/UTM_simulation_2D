@@ -3,14 +3,14 @@
   "branch": "roundabout-corridor-tuning",
   "baton": "idle",
   "last_host": "linux",
-  "next_task": "phase1-A5-tolling",
-  "updated": "2026-08-19T09:09:37+07:00",
+  "next_task": "phase2-A6-demand",
+  "updated": "2026-08-19T09:27:42+07:00",
   "queue": [
     {"id": "handshake-baseline", "status": "done",    "desc": "Both machines reproduce frozen Phase-0 baseline (seed 12345) before trusting cross-machine numbers"},
     {"id": "phase1-A7-ring",     "status": "done",    "verdict": "KILL", "desc": "Ring-entry metering (RING_METER=wrap-follow+merge-meter). Lifts ring gap 65.8->94.8m (G1' PASS) but G3 FAILS: n_battery_dead 123->153 (entry holds -> hover drain); holds +29%. Flag kept, default OFF."},
-    {"id": "phase1-A7b-ring",    "status": "done",    "verdict": "KILL", "desc": "Isolation: RING_WRAP_FOLLOW only (no merge meter). WORSE than A7: gap 76.1m median but min 65.8 (G1' FAIL), n_battery_dead 240 (G3 FAIL, worse), completed 760. Wrap-follow is the EXPENSIVE half; meter was the necessary+cheaper one. Whole ring-spacing-enforcement approach is a dead end under this demand."},
-    {"id": "phase1-A5-tolling",  "status": "blocked", "desc": "System-optimum tolling A/B behind TOLL_MODE flag (needs implementation). NOW HIGHEST PRIORITY: ring metering is exhausted; binding constraint is peak_backlog=999 launch backlog (progress.md §1) -> attack via tolling / demand-capacity."},
-    {"id": "phase1-A4-speed",    "status": "blocked", "desc": "Speed-control deconfliction A/B behind SPEED_CONTROL flag"},
-    {"id": "phase2-A6-demand",   "status": "blocked", "desc": "Demand-capacity balancing (launch-slot scheduling). Directly attacks peak_backlog=999, the reproduced binding constraint. Likely the real lever; consider promoting ahead of A5/A4."}
+    {"id": "phase1-A7b-ring",    "status": "done",    "verdict": "KILL", "desc": "Isolation: RING_WRAP_FOLLOW only (no merge meter). WORSE than A7: gap 76.1m median but min 65.8 (G1' FAIL), n_battery_dead 240 (G3 FAIL, worse), completed 760. Ring-spacing enforcement is a dead end under this demand."},
+    {"id": "phase1-A5-tolling",  "status": "done",    "verdict": "NEUTRAL", "desc": "System-optimum marginal-cost tolling (TOLL_MODE, mult 2x). All hard gates PASS (G2/G3/G1' ok) but NO benefit: holds +3.2%, completed +2, max_agents_on_a_lane flat (6), peak_backlog 999 unchanged. Higher mult (6x) also flat / slightly worse battery. Ineffective because binding constraint is launch backlog, not routing. Flag kept, default OFF."},
+    {"id": "phase2-A6-demand",   "status": "blocked", "desc": "Demand-capacity balancing (launch-slot scheduling by corridor capacity). THE demonstrated lever: A7/A7b/A5 all left peak_backlog=999 untouched -> throughput is launch-backlog-bound, not ring- or routing-bound. Replace n_active<max_concurrent at launch:~1099 with corridor slot/capacity check. Doc A6 (#2), progress.md Phase 2."},
+    {"id": "phase1-A4-speed",    "status": "blocked", "desc": "Speed-control deconfliction A/B behind SPEED_CONTROL flag (move-loop cap). Lower priority: also a tactical/routing lever, unlikely to move the launch-backlog wall."}
   ]
 }

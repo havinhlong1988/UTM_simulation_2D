@@ -157,6 +157,23 @@ FLOW_MODE=spacing. Machine copy: `phase0/baseline_summary.json`.
    Ring flags stay in, all default OFF. Files: `params/phase1_A7b_ring.params`,
    `ledger/tasks/phase1-A7b-ring.sh`, `phase1/A7b/metrics/`.
 
+8. **A5 system-optimum tolling — VERDICT NEUTRAL (safe, no benefit).** Behind
+   `TOLL_MODE` (default OFF). The capture penalty is congestion cost linear in leg
+   occupancy that each agent minimises selfishly (user equilibrium); the SO
+   marginal-cost toll internalises the externality by scaling that term
+   (SO = UE·(1+β) = 2× for β=1) — one multiply in the `leg_penalty` rebuild.
+   Result (5-seed median): **all hard gates PASS** (gridlock False, battery 121 ≤
+   123, gap not-worse) but **no ★ goal moves** — holds +3.2%, completed +2 (noise),
+   `max_agents_on_a_lane` flat 6→6, conflicts +1.9%. Higher toll (6×) also flat /
+   slightly worse battery. **Root cause: `peak_backlog=999` is unchanged —
+   throughput is launch-backlog-bound, not routing-bound, so tolling can't help.**
+   Not kept; flag stays in, default OFF. Files: `params/phase1_A5_tolling.params`,
+   `ledger/tasks/phase1-A5-tolling.sh`, `phase1/A5/metrics/`.
+   **Cumulative:** A7/A7b/A5 all leave `peak_backlog=999` untouched → the
+   bottleneck is demand/launch scheduling → **A6 (DCB) is the demonstrated lever.**
+
+**Code change made:** exactly one — the same-lane-gap `s_offset` fix (measurement
+
 **Code change made:** exactly one — the same-lane-gap `s_offset` fix (measurement
 only; **no change to simulation dynamics**; `s_offset=0` for ordinary legs so their
 metric is unchanged). Verified: n_completed / conflict_samples / gridlock identical
@@ -218,10 +235,15 @@ incl. a `python-docx` venv used only to regenerate the `.docx`).
 - **DONE — A7b isolation (VERDICT: KILL, worse than A7):** wrap-follow alone is
   the expensive half and still misses G1′. **Ring-spacing enforcement is a dead
   end here** (see §4.7). All ring flags default OFF.
-- **Next:** pivot to the demand side — the binding constraint is `peak_backlog=999`
-  (§1), untouched by ring work. Implement `phase1-A5-tolling` (system-optimum
-  tolling) and/or **promote `A6` demand-capacity launch-slot scheduling** (§2
-  Phase 2), which attacks the launch backlog directly.
+- **DONE — A5 tolling (VERDICT: NEUTRAL):** safe (all hard gates pass) but no
+  benefit — `peak_backlog=999` untouched, so routing tolling can't help (§4.8).
+- **Next → `phase2-A6-demand` (promoted).** Three interventions (A7, A7b, A5) now
+  all leave `peak_backlog=999` fixed, empirically confirming the binding
+  constraint is the **launch backlog**, not ring spacing or route choice.
+  Implement demand-capacity balancing: replace the `n_active < max_concurrent`
+  launch gate ([:1099](09_simulate_agents_2d.py:1099)) with a per-corridor
+  slot/capacity check (doc A6, §2 Phase 2). `A4` (speed) is deprioritised — also a
+  tactical lever unlikely to move the launch wall.
 
 ---
 

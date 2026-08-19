@@ -112,3 +112,36 @@ scheduling. Ring flags stay in, all default OFF (baseline untouched).
 - NEXT: **phase1-A5-tolling** (blocked; needs implementation) -- or promote
   **phase2-A6-demand** (launch-slot scheduling) which attacks peak_backlog head-on.
   Baton released (idle).
+
+## 2026-08-19T09:27:42+07:00 · host=linux · task=phase1-A5-tolling · NEUTRAL
+
+Implemented A5 system-optimum marginal-cost tolling behind `TOLL_MODE` (default
+OFF -> baseline byte-identical). The capture penalty is a congestion cost linear
+in leg occupancy that each agent minimises selfishly (user equilibrium); for a
+link cost linear in flow, the SO marginal-cost toll internalises the externality
+by scaling that term (SO = UE*(1+beta) = 2x for beta=1). Code: `toll_mode` /
+`toll_marginal_mult` params; one multiply in the leg_penalty rebuild (~1063).
+Config: `params/phase1_A5_tolling.params` (TOLL_MODE=True, mult 2.0). A/B:
+`ledger/tasks/phase1-A5-tolling.sh`, 5 D2 seeds, `phase1/A5/metrics/`.
+
+A/B result (median of 5 seeds, A5 vs frozen baseline):
+- ALL HARD GATES PASS: gridlock False (G2); n_battery_dead 121 <= 123 (G3);
+  min_same_lane_gap 65.8 not-worse (G1').
+- But NO objective moves: total_hold_minutes +3.2% (★ wanted -15%),
+  n_completed +2 (877->879, noise), max_agents_on_a_lane 6->6 (load evenness
+  flat), conflict_samples +1.9%, mean_wait +0.5%, n_reroutes -3%.
+- Robustness: mult=6x (2 seeds) is also flat / slightly worse battery; peak_backlog
+  stays 999, max lane stays 6 -> not a weak-multiplier artifact.
+
+VERDICT NEUTRAL (keep/kill §5: all hard gates pass but NO ★ goal clears -> not
+kept). SAFE, unlike A7. Root cause: peak_backlog=999 is unchanged -- throughput
+is bound by the LAUNCH BACKLOG, not by route choice, so routing tolling cannot
+help. Flag stays in, default OFF.
+
+CUMULATIVE FINDING (3 experiments): A7/A7b (ring spacing) and A5 (routing) all
+leave peak_backlog=999 untouched. The bottleneck is demand/launch scheduling.
+-> A6 Demand-Capacity Balancing is the demonstrated real lever.
+
+- NEXT: **phase2-A6-demand** (blocked; needs implementation) -- replace the
+  n_active<max_concurrent launch gate with a per-corridor slot/capacity check.
+  Baton released (idle).

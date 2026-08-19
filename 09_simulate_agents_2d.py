@@ -801,6 +801,18 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     # HIGH penalty added to a leg while an occupant is HOLDING/WAITING on it, so
     # the router routes the next agents around a jam instead of queueing behind it.
     hold_penalty = float(pget(params, "HOLD_PENALTY_M", 20000.0))
+    # A5 SYSTEM-OPTIMUM TOLLING (default OFF -> baseline unchanged). The capture
+    # penalty above is a congestion cost LINEAR in leg occupancy that each agent
+    # minimises for ITSELF -> a user equilibrium (each takes its own cheapest
+    # route, ignoring the delay it imposes on others). For a link cost linear in
+    # flow t(x)=t0+b*x, the system-optimum marginal-cost toll internalises that
+    # externality: SO edge cost = b*x + x*b = 2*b*x = UE * (1+beta), beta=1. So
+    # tolling simply scales the congestion term by toll_marginal_mult (default 2),
+    # steering agents to accept longer detours off busy legs -> load spreads and
+    # network utilisation rises. Static zone_cost is a speed/zone bias, not a
+    # congestion externality, so it is left untolled.
+    toll_mode = bool(pget(params, "TOLL_MODE", False))
+    toll_marginal_mult = float(pget(params, "TOLL_MARGINAL_MULT", 2.0))
     kmh_list, _w = _speed_classes(params)
     fast_kmh, slow_kmh = max(kmh_list), min(kmh_list)
 
@@ -1064,6 +1076,11 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                         capture_cost * max(0.0, (L - sl) / (0.5 * L))
                     if ag.holding:
                         held = True
+                # A5: marginal-cost tolling scales the congestion (capture) term
+                # so each agent internalises the delay it imposes on the leg's
+                # other users (system optimum), before the jam-avoidance penalty.
+                if toll_mode:
+                    pen *= toll_marginal_mult
                 # a leg with a holding/waiting occupant gets a HIGH penalty so
                 # following agents route around the jam rather than queue on it
                 if held:
