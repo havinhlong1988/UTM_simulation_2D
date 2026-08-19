@@ -9,7 +9,9 @@ Purpose
 Generate a synthetic 2D node map in meter coordinates with:
 
     - flyable nodes
-    - random obstacles
+    - random obstacles (kept clear of a border ring, --border-margin-m, so a
+      routable outer strip is preserved for corridors to spread dense flows
+      around the boundary)
     - DB  : drone base
     - DK  : docking station
     - FLZ : emergency landing zone
@@ -91,6 +93,13 @@ DEFAULT_NOFLY_SLOWNESS = 10.0
 
 DEFAULT_Z_VALUE = 0.0
 
+# Keep obstacles / RA clear of a border ring of this width (m) so a routable
+# strip is always left along all four map edges. Downstream (02/06/07) can then
+# lay corridors AROUND the boundary, giving high-density interior flows an
+# alternative outer path -- spreading traffic instead of forcing it through the
+# congested centre. 0 disables the ring (obstacles may touch the border).
+DEFAULT_BORDER_MARGIN_M = 400.0
+
 LABEL_NONE = "NONE"
 PREFIX_NONE = "NONE"
 
@@ -135,10 +144,14 @@ def random_circle_obstacles(
     rng: np.random.Generator,
     min_radius_m: float,
     max_radius_m: float,
+    border_margin_m: float = 0.0,
     max_trials: int = 10000,
 ) -> tuple[np.ndarray, list[dict]]:
     """
     Generate random circular obstacle blobs until target obstacle rate is reached.
+
+    border_margin_m keeps every blob fully inside the map by at least this margin,
+    leaving a clear routable ring along all four edges.
     """
     n_nodes = len(df)
     target_count = int(round(obstacle_rate * n_nodes))
@@ -154,9 +167,17 @@ def random_circle_obstacles(
         if current_count >= target_count:
             break
 
-        cx = rng.uniform(0.0, width_m)
-        cy = rng.uniform(0.0, height_m)
         radius = rng.uniform(min_radius_m, max_radius_m)
+        # keep the whole blob clear of the border ring so a routable edge strip
+        # is preserved: centre in [margin + radius, extent - margin - radius].
+        lo_x = border_margin_m + radius
+        hi_x = width_m - border_margin_m - radius
+        lo_y = border_margin_m + radius
+        hi_y = height_m - border_margin_m - radius
+        if hi_x <= lo_x or hi_y <= lo_y:
+            continue                      # margin too large for this radius; retry
+        cx = rng.uniform(lo_x, hi_x)
+        cy = rng.uniform(lo_y, hi_y)
 
         d = distance_to_center(df, cx, cy)
         new_mask = d <= radius
@@ -271,17 +292,26 @@ def add_ra_objects(
     max_radius_m: float,
     chosen_centers: list[tuple[float, float]],
     min_dist_m: float,
+    border_margin_m: float = 0.0,
 ) -> tuple[np.ndarray, list[dict]]:
     """
     Add circular restricted airspace objects.
 
-    RA is treated as hard no-fly.
+    RA is treated as hard no-fly. border_margin_m keeps every RA disc clear of the
+    border ring (its centre stays >= margin + max_radius from each edge).
     """
     n_nodes = len(df)
     ra_mask = np.zeros(n_nodes, dtype=bool)
     ra_objects: list[dict] = []
 
-    dummy_available = np.ones(n_nodes, dtype=bool)
+    # restrict candidate centres to the inner region so any RA radius up to
+    # max_radius_m still leaves the border ring clear; fall back to all nodes if
+    # the margin is so large that no inner node remains.
+    xs = df["x"].to_numpy()
+    ys = df["y"].to_numpy()
+    clr = border_margin_m + max_radius_m
+    inner = (xs >= clr) & (xs <= width_m - clr) & (ys >= clr) & (ys <= height_m - clr)
+    dummy_available = inner.copy() if inner.any() else np.ones(n_nodes, dtype=bool)
 
     for i in range(1, n_ra + 1):
         idx = choose_free_center_node(
@@ -475,6 +505,15 @@ def parse_args() -> argparse.Namespace:
         help="Target fraction of obstacle nodes, from 0.0 to 1.0.",
     )
 
+    parser.add_argument(
+        "--border-margin-m",
+        type=float,
+        default=DEFAULT_BORDER_MARGIN_M,
+        help="Keep obstacles/RA clear of a ring this wide (m) along every map "
+             "edge, leaving a routable outer strip so corridors can spread "
+             "high-density flows around the boundary. 0 disables the ring.",
+    )
+
     parser.add_argument("--n-db", type=int, default=2)
     parser.add_argument("--n-dk", type=int, default=6)
     parser.add_argument("--n-flz", type=int, default=4)
@@ -552,6 +591,8 @@ def main() -> None:
     print(f"Map size          : {args.width_m:.1f} m x {args.height_m:.1f} m")
     print(f"Grid spacing      : {args.dx_m:.1f} m")
     print(f"Obstacle rate     : {args.obstacle_rate:.3f}")
+    print(f"Border margin     : {args.border_margin_m:.0f} m "
+          f"(clear routable ring along every edge)")
     print(f"Random seed       : {args.seed}")
     print(f"Output directory  : {output_dir}")
 
@@ -580,6 +621,7 @@ def main() -> None:
         rng=rng,
         min_radius_m=args.obstacle_min_radius_m,
         max_radius_m=args.obstacle_max_radius_m,
+        border_margin_m=args.border_margin_m,
     )
 
     # Free nodes for DB/DK/FLZ placement.
@@ -633,6 +675,7 @@ def main() -> None:
         max_radius_m=args.ra_max_radius_m,
         chosen_centers=chosen_centers,
         min_dist_m=args.objective_min_dist_m,
+        border_margin_m=args.border_margin_m,
     )
 
     # ------------------------------------------------------------------
