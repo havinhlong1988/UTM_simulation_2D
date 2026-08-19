@@ -1,14 +1,23 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-10_fmm_route_plan.py
+02_route_plan.py
 
 Risk/conflict-aware route planning over a weighted 2D cost field.
 
-A standalone planning stage (steps 02/06/07 stay intact for comparison). It
-builds a weighted Eikonal impedance field over the map and, for every objective
-pair, plans the route that MINIMISES a blend of travel time, ground RISK and
-traffic CONFLICT:
+Runs directly with the PARAMETERS embedded in the header below -- no params file
+needed:
+
+    python 02_route_plan.py
+    python 02_route_plan.py --planner fmm --diversify-k 4
+    python 02_route_plan.py --planner theta --diversify-k 3 --pairs all
+
+Precedence: CLI flag > --param-file (optional) > the PARAMETERS block here. Edit
+the PARAMETERS dict below to change the run defaults.
+
+It builds a weighted Eikonal impedance field over the map and, for every
+objective pair, plans the route that MINIMISES a blend of travel time, ground
+RISK and traffic CONFLICT:
 
     cost = W_TIME*1 + W_RISK*risk_norm(step01) + W_CONFLICT*conflict_norm(step08)
 
@@ -32,21 +41,15 @@ Inputs
     output/08_costmap/slowness_costmap.npz   traffic-density slowness (step 08)
     output/07_corridor_network/*         objectives + pair list (+ lanes overlay)
 
-Outputs (output/10_fmm_routes/)
--------------------------------
-    fmm_routes.csv        pair, seq, x, y, risk, conflict per route point
-    route_summary.csv     per-pair length / mean risk / mean conflict / cost
-    metrics.json          run-level summary + weights
+Outputs (OUT_DIR)
+-----------------
+    route_points.csv      pair, alt, seq, x, y, risk, conflict per route point
+    route_summary.csv     per-pair length / mean risk / mean conflict
+    metrics.json          run-level summary + planner/lock config + weights
     cost_field.png        weighted impedance + all routes
     risk_field.png        risk term + routes
     conflict_field.png    conflict term + routes
     arrival_field.png     one example FMM arrival-cost field
-
-Run
----
-    python 10_fmm_route_plan.py
-    python 10_fmm_route_plan.py --param-file params/fmm_route_plan.params \\
-        --w-risk 3 --w-conflict 2 --pairs all
 """
 from __future__ import annotations
 
@@ -67,7 +70,39 @@ from src.fmm import eikonal_fmm, backtrack
 from src.maprule import add_map_rule
 
 THIS_DIR = Path(__file__).resolve().parent
-VERSION = "v1"
+VERSION = "v2"
+
+# ======================================================================
+# PARAMETERS  (run defaults -- edit here; overridden by --param-file / CLI)
+# ======================================================================
+PARAMETERS: dict = {
+    # ---- inputs / outputs ----
+    "RISK_XYZ":      "output/01_random_node_map/random_2d_node_riskmap_seed2443556934.xyz",
+    "COST_MAP_FILE": "output/08_costmap/slowness_costmap.npz",
+    "CORRIDOR_DIR":  "output/07_corridor_network",
+    "OUT_DIR":       "output/02_route_plan",
+    "PAIR_SOURCE":   "corridor",     # "corridor" (pair_routes.csv) | "all" (every objective pair)
+    # ---- cost-field weights ----
+    "W_TIME":     1.0,               # travel time / path length
+    "W_RISK":     2.0,               # obstacle + RA risk exposure (step 01)
+    "W_CONFLICT": 1.5,               # traffic-density / conflict exposure (step 08)
+    "COST_FLOOR": 0.05,              # min impedance on a free cell (FMM needs cost > 0)
+    "RISK_BUFFER_M": 300.0,          # decay length of the hazard-proximity risk (0 = off)
+    "NOFLY_AS_OBSTACLE": True,       # True: no-fly = infinite cost; False: add NOFLY_PENALTY
+    "NOFLY_SLOWNESS":    10.0,       # step-01 slowness >= this marks a no-fly cell
+    "NOFLY_PENALTY":     50.0,       # soft no-fly cost when NOFLY_AS_OBSTACLE is False
+    "CONFLICT_FROM_COSTMAP": True,   # use step-08 slowness as the conflict term
+    "ROUTE_SMOOTH_WIN":  3,          # moving-average window (cells) for plotted routes; 0/1 = raw
+    "MAKE_FIGURES":      True,
+    # ---- planner selection ----
+    "PLANNER":    "fmm",             # "fmm" (Eikonal field) | "theta" (any-angle A*/Theta*)
+    # ---- lock-and-re-search (path diversification) ----
+    "DIVERSIFY_K":      1,           # alternatives per pair (1 = single path, off)
+    "LOCK_PENALTY":     4.0,         # soft-lock: cost added per unit usage along a locked route
+    "LOCK_HALFWIDTH_M": 150.0,       # half-width (m) of the locked corridor stamped into usage
+    "LOCK_MODE":        "soft",      # "soft" (penalty) | "hard" (mask the corridor as no-fly)
+    "LOCK_SCOPE":       "global",    # "global" (spread ALL pairs) | "per_pair" (K per pair)
+}
 
 
 # ----------------------------------------------------------------------
@@ -107,8 +142,11 @@ def pget(params, key, default):
 
 
 def parse_args() -> argparse.Namespace:
-    p = argparse.ArgumentParser(description="FMM risk/conflict-aware route planner.")
-    p.add_argument("--param-file", default="params/fmm_route_plan.params")
+    p = argparse.ArgumentParser(
+        description="Risk/conflict-aware route planner (FMM or Theta*, with "
+                    "optional lock-and-re-search diversification).")
+    p.add_argument("--param-file", default=None,
+                   help="optional params file that overrides the header PARAMETERS.")
     p.add_argument("--w-time", type=float, default=None)
     p.add_argument("--w-risk", type=float, default=None)
     p.add_argument("--w-conflict", type=float, default=None)
@@ -370,7 +408,15 @@ def field_figure(field, extent, routes, obj_xy, title, cbar_label, cmap, out_png
 # ----------------------------------------------------------------------
 def main() -> None:
     args = parse_args()
-    params = load_params(THIS_DIR / args.param_file)
+    # header PARAMETERS are the base; an optional --param-file overrides them;
+    # explicit CLI flags (below) override both.
+    params = dict(PARAMETERS)
+    if args.param_file:
+        pf = THIS_DIR / args.param_file
+        if pf.exists():
+            params.update(load_params(pf))
+        else:
+            print(f"[warn] --param-file {pf} not found; using header PARAMETERS")
 
     w_time = args.w_time if args.w_time is not None else float(pget(params, "W_TIME", 1.0))
     w_risk = args.w_risk if args.w_risk is not None else float(pget(params, "W_RISK", 2.0))
@@ -392,7 +438,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
-    print(f"10_fmm_route_plan.py  {VERSION}")
+    print(f"02_route_plan.py  {VERSION}")
     print(f"Planner       : {planner}"
           + (f"  +lock-and-re-search K={diversify_k} "
              f"({lock_mode}, hw={lock_halfwidth:.0f}m, scope={lock_scope})"
@@ -524,7 +570,7 @@ def main() -> None:
             if diversify_k > 1 or lock_scope == "global":
                 stamp_usage(usage, [tuple(p) for p in path], dx, lock_halfwidth)
 
-    pd.DataFrame(rows_pts).to_csv(out_dir / "fmm_routes.csv", index=False)
+    pd.DataFrame(rows_pts).to_csv(out_dir / "route_points.csv", index=False)
     summ = pd.DataFrame(rows_sum)
     summ.to_csv(out_dir / "route_summary.csv", index=False)
     print(f"Planned       : {n_ok}/{len(pairs)} routes")
@@ -555,7 +601,7 @@ def main() -> None:
         "mean_conflict_exposure": None if not len(summ) else round(float(summ["mean_conflict"].mean()), 4),
     }
     (out_dir / "metrics.json").write_text(json.dumps(metrics, indent=2), encoding="utf-8")
-    print(f"Saved         : {out_dir/'fmm_routes.csv'}, route_summary.csv, metrics.json")
+    print(f"Saved         : {out_dir/'route_points.csv'}, route_summary.csv, metrics.json")
 
     # ---- figures ----
     if make_fig:
