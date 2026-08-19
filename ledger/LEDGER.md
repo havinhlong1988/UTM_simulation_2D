@@ -46,3 +46,39 @@ First linux shift. Env parity confirmed against frozen Phase-0 baseline (seed 12
 - NEXT: none `todo`. Phase-1 tasks (phase1-A5-tolling, -A4-speed, -A7-ring) are
   `blocked` pending implementation (one param flag each, default off, vs baseline).
   Baton released (idle).
+
+## 2026-08-19T09:02:01+07:00 · host=linux · task=phase1-A7-ring · KILL
+
+Implemented A7 ring-entry metering behind `RING_METER` (default OFF -> baseline
+byte-identical). Root cause of the sub-80m ring floor: ring global progress
+`s_local+s_offset` is NOT wrapped to the circumference, so an agent past the
+2*pi*r seam sees no leader near angle 0 and closes inside the headway. A7 makes
+ring car-following + ring merges wrap-aware (compare mod ring_circ) and meters the
+merge to keep >= RING_METER_GAP_M (80m) clear both sides.
+
+Code: `09_simulate_agents_2d.py` — LegSeg.ring_circ slot; ring_seg sets 2*pi*r;
+`ring_meter`/`ring_meter_gap` params; wrap-aware branch in enter_leg merge check
+and in the move-loop leader cap. Config: `params/phase1_A7_ring.params` (baseline
++ RING_METER=True). A/B: `ledger/tasks/phase1-A7-ring.sh`, 5 D2 seeds,
+`phase1/A7/metrics/`.
+
+A/B result (median of 5 seeds, A7 vs frozen baseline):
+- min_same_lane_gap_m  65.8 -> 94.8  (min 81.1 all seeds) .... G1' PASS (target hit)
+- gridlock             False ......................... G2 PASS
+- n_battery_dead       123  -> 153  (+24%) ............ G3 FAIL  <-- kills it (INV-1)
+- total_hold_minutes   12772 -> 16532 (+29%) .......... ★ wanted -15%, went +29%
+- conflict_samples     4006 -> 4883  (+22%)
+- n_completed          877  -> 847  (-3.4%)
+- mean_wait / reroutes 6119->6654 (+9%) / 1063->1727 (+63%)
+- peak_backlog         999 (unchanged; still the binding launch-backlog constraint)
+
+VERDICT KILL (keep/kill rule §5): metering the ring entry forces entry holds ->
+hover drain -> more battery deaths (hard-gate G3) and a hold/conflict cascade.
+The *wrap fix* is correct and the gap target is reachable; the *cost* is the
+merge meter + eager cross-seam yielding. Flag stays in, default OFF; baseline
+untouched.
+
+- NEXT: **phase1-A7b-ring** (blocked) — retry with ONLY the wrap-aware ring
+  car-following (drop the merge meter) or a smaller RING_METER_GAP_M, to isolate
+  which half costs G3 and get the gap up without the battery cascade.
+  Baton released (idle).

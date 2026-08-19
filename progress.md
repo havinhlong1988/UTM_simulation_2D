@@ -130,6 +130,20 @@ FLOW_MODE=spacing. Machine copy: `phase0/baseline_summary.json`.
    sampled every 20 s, so crossing traffic ~10 s apart can look coincident; this
    affects ring and no-ring equally and is not a code bug.
 
+6. **A7 ring-entry metering — implemented + A/B'd, VERDICT KILL** (behind
+   `RING_METER`, default OFF). Root cause of the sub-80 m ring floor: the ring
+   global coordinate `s_local + s_offset` is **not wrapped** to the circumference,
+   so an agent past the 2·π·r seam sees no leader near angle 0 and closes inside
+   the headway. A7 makes ring car-following + ring merges wrap-aware (compare mod
+   `ring_circ`) and meters the merge to keep ≥ `RING_METER_GAP_M` (80 m) clear on
+   both sides. Result (5-seed median): gap **65.8 → 94.8 m** (G1′ PASS), but
+   `n_battery_dead` **123 → 153** (**G3 FAIL** — metering holds → hover drain),
+   `total_hold_minutes` +29 %, conflicts +22 %, reroutes +63 %, n_completed −3.4 %.
+   **Killed** by the keep/kill rule. Flag stays in, default OFF (baseline
+   untouched). Follow-up queued: `phase1-A7b-ring` (wrap car-following only, no
+   merge meter). Files: `params/phase1_A7_ring.params`, `ledger/tasks/phase1-A7-ring.sh`,
+   `phase1/A7/metrics/`.
+
 **Code change made:** exactly one — the same-lane-gap `s_offset` fix (measurement
 only; **no change to simulation dynamics**; `s_offset=0` for ordinary legs so their
 metric is unchanged). Verified: n_completed / conflict_samples / gridlock identical
@@ -179,11 +193,18 @@ incl. a `python-docx` venv used only to regenerate the `.docx`).
 
 ## 7. Pending action + next step
 
-- **PENDING COMMIT:** the metric fix is applied and `git add`-ed but the commit did
-  **not** go through (harness safety-classifier was overloaded). Before pulling on
-  Linux, commit & push it (see §8). Suggested message is in §8.
-- **Next after break:** confirm G1′, then start **Phase 1** — `A7` (ring metering,
-  which lifts the ring-entry gap above 80 m) alongside `A5` and `A4`.
+- **DONE (pushed):** metric fix (`b063284`) + Phase-0 harness/baseline (`5b082f2`)
+  are committed and on `origin/roundabout-corridor-tuning`. The old §7 "pending
+  commit" is resolved.
+- **DONE — handshake:** linux reproduces the frozen baseline (seed 12345 MATCH);
+  cross-machine numbers trusted. Ledger: `ledger/LEDGER.md`.
+- **DONE — A7 ring metering (VERDICT: KILL):** implemented behind `RING_METER`
+  (default OFF). Lifts ring gap **65.8 → 94.8 m** (G1′ PASS) but **G3 fails**
+  (`n_battery_dead` 123 → 153: metering holds → hover drain) and holds +29%. Flag
+  kept, default OFF; baseline unchanged. See §4.6.
+- **Next:** `phase1-A7b-ring` — retry with the **wrap-aware ring car-following
+  only** (drop the merge meter), or a smaller `RING_METER_GAP_M`, to lift the gap
+  without the battery cascade. Then `A5` (tolling) and `A4` (speed control).
 
 ---
 

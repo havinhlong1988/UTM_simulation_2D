@@ -215,11 +215,20 @@ class LegSeg:
     is not comparable to another's. s_offset is the ring-lane arc position of
     this seg's start (measured in the lane's circulation direction from a fixed
     reference), so `s_local + s_offset` is a common progress coordinate for all
-    agents on the same ring resource. Straight legs use s_offset = 0."""
-    __slots__ = ("res", "xy", "cs", "length", "src_node", "dst_node", "s_offset")
+    agents on the same ring resource. Straight legs use s_offset = 0.
+
+    ring_circ is the circumference (2*pi*r) of the ring lane this seg rides, or
+    0.0 for straight legs. The global progress `s_local + s_offset` is NOT reduced
+    modulo the circumference, so an agent that has circulated past the 2*pi*r wrap
+    reads a global coordinate larger than every un-wrapped occupant near angle 0 --
+    it then sees no leader ahead and can close inside the headway at the wrap seam.
+    ring_circ lets the RING_METER logic compare positions on the circle (mod
+    ring_circ) so spacing holds across that seam."""
+    __slots__ = ("res", "xy", "cs", "length", "src_node", "dst_node",
+                 "s_offset", "ring_circ")
 
     def __init__(self, res: str, xy: np.ndarray, src_node: str, dst_node: str,
-                 s_offset: float = 0.0):
+                 s_offset: float = 0.0, ring_circ: float = 0.0):
         self.res = res
         self.xy = xy
         self.cs = polyline_cumlen(xy)
@@ -227,6 +236,7 @@ class LegSeg:
         self.src_node = src_node
         self.dst_node = dst_node
         self.s_offset = float(s_offset)
+        self.ring_circ = float(ring_circ)
 
 
 class Network:
@@ -418,7 +428,8 @@ class Network:
         ang = th_in + direction * np.linspace(0.0, sweep, n)
         arc = np.column_stack([c[0] + r * np.cos(ang), c[1] + r * np.sin(ang)])
         xy = np.vstack([np.asarray(p_in, float), arc, np.asarray(p_out, float)])
-        return LegSeg(res, np.ascontiguousarray(xy, float), rbt, rbt, s_offset=s_offset)
+        return LegSeg(res, np.ascontiguousarray(xy, float), rbt, rbt,
+                      s_offset=s_offset, ring_circ=two_pi * r)
 
     def route_segs(self, pairs) -> list[LegSeg]:
         """Legs of a route as directed segs, with a RING ARC spliced in wherever
@@ -764,6 +775,15 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     # is effectively "locked" to new entries until its occupant clears that
     # much of it, which spreads traffic across more lanes/routes.
     merge_frac = float(pget(params, "MERGE_FREE_FRAC", 0.5))
+    # A7 RING METERING (default OFF -> baseline unchanged). The ring global
+    # progress s_local+s_offset is not wrapped to the circumference, so spacing
+    # can break at the 2*pi*r seam (an agent past the wrap sees no leader near
+    # angle 0). When on, ring-lane car-following and ring merges compare positions
+    # on the circle (mod ring_circ) so the headway holds across the seam, and a
+    # merge is metered to keep >= ring_meter_gap clear on BOTH sides of the entry.
+    ring_meter = bool(pget(params, "RING_METER", False))
+    # meter gap floor at ring entry; defaults to the same distance floor as legs.
+    ring_meter_gap = float(pget(params, "RING_METER_GAP_M", sep_floor))
     # Dynamic (ACO-style) congestion cost: capturing a leg raises its routing
     # cost; the penalty of an occupant decays to 0 as it passes the half-way
     # point of the leg (a gradient), so a freshly-taken leg is expensive and
@@ -911,11 +931,23 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             # merge only if the entry neighbourhood on this lane is free. Global
             # coords: a shared ring lane is ENTERED at s_offset (its entry angle),
             # not at 0, so check for occupants just behind..ahead of that point.
-            merge_gap = max(merge_frac * seg.length, sep_of(a))
             entry_g = seg.s_offset
             occg = occ.get(seg.res, ())
-            if any((entry_g - sep_of(a)) < g < (entry_g + merge_gap) for (g, _o) in occg):
-                return False
+            if ring_meter and seg.ring_circ > 0.0:
+                # A7: meter the ring merge on the CIRCLE. Keep >= gap clear on both
+                # sides of the entry angle (wrap-aware), so no agent is injected
+                # inside the headway of one that has circulated past the seam.
+                circ = seg.ring_circ
+                gap = max(ring_meter_gap, sep_of(a))
+                p0 = entry_g % circ
+                for (g, _o) in occg:
+                    d = abs((g % circ) - p0)
+                    if min(d, circ - d) < gap:
+                        return False
+            else:
+                merge_gap = max(merge_frac * seg.length, sep_of(a))
+                if any((entry_g - sep_of(a)) < g < (entry_g + merge_gap) for (g, _o) in occg):
+                    return False
         if node_mutex:
             key = (seg.src_node, leg_level(seg))     # (node, level): same-level only
             if a.held_node != key:
@@ -1099,11 +1131,22 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             # bound, so subtract this seg's s_offset back out.
             if not flow_block and not a.is_patrol:
                 my_g = a.s_local + seg.s_offset
-                leader = min((g for (g, o) in occ.get(seg.res, ())
-                              if o is not a and g > my_g + 1e-6), default=None)
-                if leader is not None:
-                    leader_cap = leader - seg.s_offset - sep_of(a)
-                    cap = min(cap, leader_cap)
+                if ring_meter and seg.ring_circ > 0.0:
+                    # A7: find the leader by smallest FORWARD gap around the circle,
+                    # so an agent past the 2*pi*r seam still yields to the occupant
+                    # near angle 0 ahead of it (fixes the wrap under-separation).
+                    circ = seg.ring_circ
+                    fgap = min(((g - my_g) % circ for (g, o) in occ.get(seg.res, ())
+                                if o is not a), default=None)
+                    if fgap is not None and fgap > 1e-6:
+                        leader_cap = a.s_local + (fgap - sep_of(a))
+                        cap = min(cap, leader_cap)
+                else:
+                    leader = min((g for (g, o) in occ.get(seg.res, ())
+                                  if o is not a and g > my_g + 1e-6), default=None)
+                    if leader is not None:
+                        leader_cap = leader - seg.s_offset - sep_of(a)
+                        cap = min(cap, leader_cap)
             if node_mutex:
                 lev = leg_level(seg)
                 zone_src = node_zone(seg.src_node, L)

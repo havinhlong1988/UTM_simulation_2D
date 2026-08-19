@@ -3,12 +3,13 @@
   "branch": "roundabout-corridor-tuning",
   "baton": "idle",
   "last_host": "linux",
-  "next_task": null,
-  "updated": "2026-08-19T08:37:05+07:00",
+  "next_task": "phase1-A7b-ring",
+  "updated": "2026-08-19T09:02:01+07:00",
   "queue": [
     {"id": "handshake-baseline", "status": "done",    "desc": "Both machines reproduce frozen Phase-0 baseline (seed 12345) before trusting cross-machine numbers"},
+    {"id": "phase1-A7-ring",     "status": "done",    "verdict": "KILL", "desc": "Ring-entry metering A/B behind RING_METER flag. Lifts ring gap 65.8->94.8m (G1' PASS) but G3 FAILS: n_battery_dead 123->153 (metering holds -> hover drain); holds +29%. Flag kept, default OFF. Details: LEDGER.md, progress.md §4."},
+    {"id": "phase1-A7b-ring",    "status": "blocked", "desc": "Gentler A7: wrap-aware ring car-following ONLY (drop the merge meter) or smaller RING_METER_GAP_M, to lift gap without the battery-death cascade. Isolates which half of A7 costs G3."},
     {"id": "phase1-A5-tolling",  "status": "blocked", "desc": "System-optimum tolling A/B behind TOLL_MODE flag (needs implementation)"},
-    {"id": "phase1-A4-speed",    "status": "blocked", "desc": "Speed-control deconfliction A/B behind SPEED_CONTROL flag"},
-    {"id": "phase1-A7-ring",     "status": "blocked", "desc": "Ring-entry metering A/B behind RING_METER flag (also lifts ring gap >= 80m, G1')"}
+    {"id": "phase1-A4-speed",    "status": "blocked", "desc": "Speed-control deconfliction A/B behind SPEED_CONTROL flag"}
   ]
 }
