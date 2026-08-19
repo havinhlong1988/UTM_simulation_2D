@@ -318,3 +318,26 @@ kept, flag default OFF (baseline safe), for a possible future proper design.
 - NEXT: recommend stopping the A-series here -- A6 (baseline_p1) + A4 are the
   wins; A2/A3 (CBS/PBS) would hit the same reactive-vs-planned mismatch. Await
   user steer. Baton idle.
+
+## 2026-08-19T12:40:00+07:00 · host=linux · task=promote-baseline-p2 · NOTE
+
+Consolidation shift. Promoted baseline_p1 + A4 (SPEED_CONTROL band 0.5) to FROZEN
+**baseline_p2** = the best config (A6 DCB + A4 speed control). Files:
+params/baseline_p2.params, baseline_p2/{run_seeds.sh,aggregate.py,
+baseline_summary.json,metrics/}. 5-seed frozen medians: completed 925, hold
+6911min, battery_dead 75, conflict 4049, mean_wait 6658s, makespan 5.96h,
+gridlock False. STATE.baseline = baseline_p2. Phase-4+ A/Bs measure against it;
+baseline_p0 remains the env-parity handshake reference.
+
+Wrote RESULTS.md -- the full A1-A9 campaign write-up (baselines p0/p1/p2, every
+verdict, cumulative gains, and the structural findings). A-series concluded:
+KILL A7/A7b, NEUTRAL A5, KEEP A6+A4, NOT-VIABLE A1 (A2/A3 would share A1's
+reactive-vs-planned mismatch).
+
+Cumulative vs original baseline_p0 (median): n_completed 877->925 (+5.5%),
+total_hold 12772->6911 (-46%), n_battery_dead 123->75 (-39%), conflict 4006->4049
+(flat), makespan 5.12->5.96h (+16%), mean_wait 6119->6658 (+8.8%).
+
+- NEXT: none queued (A-series done). Options for a future shift: proper
+  schedule-following executor (unlocks A1/A2/A3), or accept baseline_p2 as final.
+  Baton idle.

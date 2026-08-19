@@ -304,13 +304,13 @@ incl. a `python-docx` venv used only to regenerate the `.docx`).
   launch-bound (§4.10). `SPEED_CONTROL`, band 0.5, default OFF.
 - **DONE — A1 space-time reservation (VERDICT: NOT-VIABLE):** doesn't scale on this
   reactive executor (§4.11); flag kept OFF, baseline byte-identical.
-- **Next options:**
-  1. **Promote `baseline_p1` + A4 → `baseline_p2`** (new frozen reference), if you
-     want the makespan gain baked into the baseline.
-  2. **Stop the A-series** — A6 (`baseline_p1`) + A4 are the wins; A2/A3 (CBS/PBS)
-     would hit the same reactive-vs-planned mismatch as A1. Write up results.
-  3. **Proper A1 redesign** (bigger build): make the executor *honor* reservations
-     (schedule-following), not just route by them.
+- **DONE — consolidation:** promoted `baseline_p1` + A4 → **`baseline_p2`** (the
+  best config: A6 DCB + A4 speed control); full campaign written up in
+  [`RESULTS.md`](RESULTS.md). A-series concluded.
+- **A-series verdicts:** KILL A7/A7b · NEUTRAL A5 · **KEEP A6 + A4** · NOT-VIABLE A1.
+- **Future work (new shift):** a schedule-following executor would unlock A1/A2/A3;
+  otherwise `baseline_p2` stands as the delivered result. `baseline_p2` medians:
+  completed 925, holds 6911 min, deaths 75, makespan 5.96 h.
 
 ---
 
