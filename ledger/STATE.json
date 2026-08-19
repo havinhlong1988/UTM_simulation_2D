@@ -4,8 +4,8 @@
   "baton": "idle",
   "last_host": "linux",
   "baseline": "baseline_p1",
-  "next_task": "phase1-A4-speed",
-  "updated": "2026-08-19T10:15:40+07:00",
+  "next_task": "promote-baseline-p2",
+  "updated": "2026-08-19T11:04:13+07:00",
   "queue": [
     {"id": "handshake-baseline", "status": "done",    "desc": "Both machines reproduce frozen Phase-0 baseline (seed 12345) before trusting cross-machine numbers"},
     {"id": "phase1-A7-ring",     "status": "done",    "verdict": "KILL", "desc": "Ring-entry metering (RING_METER=wrap-follow+merge-meter). Lifts ring gap 65.8->94.8m (G1' PASS) but G3 FAILS: n_battery_dead 123->153 (entry holds -> hover drain); holds +29%. Flag kept, default OFF."},
@@ -13,6 +13,8 @@
     {"id": "phase1-A5-tolling",  "status": "done",    "verdict": "NEUTRAL", "desc": "System-optimum marginal-cost tolling (TOLL_MODE, mult 2x). All hard gates PASS but NO benefit: holds +3.2%, completed +2, peak_backlog 999 unchanged. Ineffective because binding constraint is launch backlog, not routing. Flag kept, default OFF."},
     {"id": "phase2-A6-demand",   "status": "done",    "verdict": "KEEP", "desc": "Demand-capacity balancing (DCB_MODE, per-origin-corridor fair-share airborne cap). THE lever. 5-seed sweep of DCB_CORRIDOR_SHARE {0.75,1.0,1.25,1.5}: monotone throughput<->latency curve. Chose share=1.5 (efficiency knee): completed +5.4%, holds -13%, battery_dead -38%, mean_wait +5.5%, makespan 6.22h (within 8h shift). (share=0.75 was safety-max: -76% deaths but makespan 8.67h exceeds shift.) Flag default OFF."},
     {"id": "promote-baseline-p1", "status": "done",    "desc": "Promoted A6 (share=1.5) to new FROZEN baseline baseline_p1 = baseline_p0 + DCB_MODE. Files: params/baseline_p1.params, baseline_p1/{run_seeds.sh,aggregate.py,baseline_summary.json,metrics/}. Phase-3+ A/Bs measure against baseline_p1. baseline_p0 stays the env-parity handshake reference."},
-    {"id": "phase1-A4-speed",    "status": "blocked", "desc": "Speed-control deconfliction A/B behind SPEED_CONTROL flag (interpolate cap/new_s in move loop instead of hard hold). Now most promising remaining: could recover some of A6's makespan/wait cost by smoothing stop-and-go. A/B against baseline_p1 (DCB already on)."}
+    {"id": "phase1-A4-speed",    "status": "done",    "verdict": "KEEP", "desc": "Speed control (SPEED_CONTROL, band factor 0.5) A/B vs baseline_p1. Ramps cruise speed down near a leader instead of full-tilt-then-stop; battery drains at actual velocity. 5-seed median: makespan 6.22->5.96h (-4.2%, recovers ~24% of DCB's add), total_hold -38.1%, conflicts -0.8%, deaths 76->75, completed flat; all hard gates PASS. Cost: mean_wait +3.2% (NOT recovered -- launch-queue bound, not air), reroutes +11.4%. Band sweep: 0.5 is the knee (1.0 over-packs -> conflicts+13%/G3 fail; 2.0 much worse). Flag default OFF."},
+    {"id": "promote-baseline-p2", "status": "todo",    "desc": "Optional: promote baseline_p1 + A4 (SPEED_CONTROL, band 0.5) to baseline_p2 as the new frozen reference, mirroring baseline_p1. Awaiting user OK."},
+    {"id": "phase3-A1-sipp",     "status": "blocked", "desc": "A1 space-time reservation / SIPP replacing ACO plan_route (doc #1, the larger structural rewrite). Foundational for A2/A3 CBS/PBS."}
   ]
 }

@@ -249,3 +249,34 @@ Generates one file per delivery agent (1000) + network.js. Verified in-browser
 no sim-dynamics change.
 
 - NEXT: unchanged (phase1-A4-speed). Baton idle.
+
+## 2026-08-19T11:04:13+07:00 · host=linux · task=phase1-A4-speed · KEEP
+
+Implemented A4 speed control behind `SPEED_CONTROL` (default OFF -> baseline
+byte-identical). Baseline car-following is bang-bang: full speed up to the hard
+(leader - sep) cap, then STOP. A4 ramps cruise speed down over a band above the
+sep floor (band = SPEED_CTRL_BAND_FACTOR * sep_of(a)); the hard caps still bound
+motion, so it only ever slows an agent. Battery then drains at the ACTUAL
+velocity (adv/dt) instead of eff_speed -- slow cruise costs less than full cruise,
+which the baseline (full-speed-or-hover) could not represent. Code: move-loop
+speed limiter + actual-velocity battery, both guarded by the flag.
+
+A/B vs **baseline_p1** (DCB on), 5 D2 seeds, band factor **0.5**:
+- sim_end_hours (makespan) 6.22 -> 5.96h  (-4.2%)  <- GOAL: recovers ~24% of the
+  1.10h DCB added over baseline_p0 (5.12h)
+- total_hold_minutes 11162 -> 6911  (-38.1%)  (partly definitional: creeping != holding)
+- n_battery_dead 76 -> 75 (G3 PASS) · conflict_samples 4082 -> 4049 (-0.8%)
+- n_completed 924 -> 925 (flat) · gap 65.75 (not-worse) · gridlock False
+- COST: mean_wait 6455 -> 6658 (+3.2%, NOT recovered -- it is launch-queue
+  deferral, which air speed control cannot touch); n_reroutes 903 -> 1006 (+11.4%).
+
+Band sweep (2 seeds): factor 0.5 is the knee. 1.0 over-packs creeping agents ->
+conflicts +13%, n_battery_dead 79 > 76 (G3 FAIL). 2.0 far worse (completed -7%,
+deaths ~doubled). So gentle smoothing helps; aggressive smoothing hurts.
+
+VERDICT KEEP: all hard gates pass, ★ hold goal clears (-38%), and the makespan
+recovery goal is met. Only blemish n_reroutes +11%. mean_wait stays launch-bound
+(A6 remains the lever there). Flag default OFF.
+
+- NEXT: **promote-baseline-p2** (optional, awaiting user OK) -- freeze baseline_p1
+  + A4 as baseline_p2. Then A1 space-time reservation (doc #1). Baton idle.

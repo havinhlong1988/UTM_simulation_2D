@@ -195,6 +195,18 @@ FLOW_MODE=spacing. Machine copy: `phase0/baseline_summary.json`.
    A6 config is a candidate new frozen baseline.** Files:
    `params/phase2_A6_dcb.params`, `ledger/tasks/phase2-A6-demand.sh`, `phase2/A6/metrics/`.
 
+10. **A4 speed control — VERDICT KEEP** (behind `SPEED_CONTROL`, default OFF;
+   A/B'd vs `baseline_p1`, DCB on). Baseline car-following is bang-bang (full speed
+   to the leader−sep cap, then stop); A4 ramps cruise speed down over a band above
+   the sep floor (`band = SPEED_CTRL_BAND_FACTOR·sep`), and drains battery at the
+   *actual* velocity. Result (5-seed median, **band=0.5**): **makespan 6.22→5.96 h
+   (−4.2%, recovers ~24% of DCB's makespan add)**, `total_hold` −38.1%, deaths
+   76→75, conflicts −0.8%, completions flat; **all hard gates PASS**. Cost:
+   `mean_wait` +3.2% (not recovered — launch-queue-bound, air control can't touch),
+   `n_reroutes` +11.4%. Band sweep: 0.5 is the knee — 1.0 over-packs creeping
+   agents (conflicts +13%, G3 fails); 2.0 far worse. Flag default OFF. Files:
+   `params/phase3_A4_speed.params`, `ledger/tasks/phase3-A4-speed.sh`, `phase3/A4/metrics/`.
+
 **Code change made:** exactly one — the same-lane-gap `s_offset` fix (measurement
 only; **no change to simulation dynamics**; `s_offset=0` for ordinary legs so their
 metric is unchanged). Verified: n_completed / conflict_samples / gridlock identical
@@ -269,10 +281,14 @@ incl. a `python-docx` venv used only to regenerate the `.docx`).
   6.22 h. **Promoted to new frozen baseline `baseline_p1`** = baseline_p0 + DCB
   (`params/baseline_p1.params`, `baseline_p1/`). Phase-3+ A/Bs measure against
   `baseline_p1`; `baseline_p0` stays the env-parity handshake reference.
-- **Next options (A/B against `baseline_p1`):**
-  1. **`phase1-A4-speed`** (speed control) — smooth stop-and-go to claw back some
-     of A6's makespan/wait cost (DCB already on in baseline_p1).
-  2. **A1 space-time reservation** (doc #1) — the larger structural rewrite.
+- **DONE — A4 speed control (VERDICT: KEEP):** recovers ~24% of DCB's makespan add
+  (6.22→5.96 h) and cuts holds −38%, all hard gates pass; mean_wait stays
+  launch-bound (§4.10). `SPEED_CONTROL`, band 0.5, default OFF.
+- **Next options:**
+  1. **Promote `baseline_p1` + A4 → `baseline_p2`** (new frozen reference), if you
+     want the makespan gain baked into the baseline for phase-3+ A/Bs.
+  2. **A1 space-time reservation / SIPP** (doc #1) — the larger structural rewrite,
+     foundational for A2/A3 (CBS/PBS).
 
 ---
 

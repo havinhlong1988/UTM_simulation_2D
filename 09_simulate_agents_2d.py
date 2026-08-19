@@ -770,6 +770,18 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     dcb_n_origins = max(1, len({a.origin for a in agents if not a.is_patrol}))
     dcb_cap = dcb_cap_param if dcb_cap_param > 0 else \
         max(1, math.ceil(dcb_share * max_concurrent / dcb_n_origins))
+    # A4 SPEED CONTROL (default OFF -> baseline unchanged). Baseline car-following
+    # is bang-bang: run at full speed up to the hard (leader - sep) cap, then STOP
+    # (stop-and-go, and a stopped agent hovers). Speed control instead ramps the
+    # cruise speed DOWN over a band above the separation floor, so an agent
+    # decelerates early and keeps creeping instead of fully stopping -- smoother
+    # flow, fewer hard holds. Battery then drains at the agent's ACTUAL velocity
+    # (slow cruise costs less than full cruise), which baseline could not model
+    # because it only ever ran full-speed or hovered.
+    speed_control = bool(pget(params, "SPEED_CONTROL", False))
+    # width of the deceleration band, as a multiple of the required gap sep_of(a):
+    # speed ramps 0 (at the floor) -> full (at floor + band).
+    speed_ctrl_band = float(pget(params, "SPEED_CTRL_BAND_FACTOR", 1.0))
     node_mutex = bool(pget(params, "NODE_MUTEX_ENABLE", False))
     node_approach = float(pget(params, "NODE_APPROACH_M", 50.0))
     obj_approach = float(pget(params, "OBJECTIVE_APPROACH_M", 120.0))
@@ -1220,6 +1232,19 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                     else:
                         node_cap = approach_s
                         cap = min(cap, approach_s)
+            # A4: smooth the approach to the leader -- ramp cruise speed down over
+            # a band above the separation floor instead of running full-tilt into
+            # the hard cap and stopping. `room` is the metres of headroom before
+            # the sep floor (= leader_cap - s_local, same for straight and ring
+            # legs). The hard caps above still bound new_s, so this only ever slows
+            # an agent, never speeds it past a leader.
+            if speed_control and leader_cap is not None:
+                room = leader_cap - a.s_local
+                band = speed_ctrl_band * sep_of(a)
+                if band > 1e-6:
+                    frac = room / band
+                    frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
+                    desired = a.s_local + eff_speed * frac * dt
             new_s = max(a.s_local, min(desired, cap))
             adv = new_s - a.s_local
             if adv > 1e-9 and not a.is_patrol:
@@ -1236,9 +1261,13 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                     elif leader_cap is not None:
                         hold_cause["leader"] += 1
             a.s_local = new_s
-            # drain battery: cruise power at the TRUE velocity, hover when held
+            # drain battery: cruise power at the TRUE velocity, hover when held.
+            # A4: when speed control is on the agent may cruise BELOW eff_speed, so
+            # charge cube-law power at the ACTUAL velocity (adv/dt); baseline runs
+            # full-speed-or-hover, so eff_speed keeps it byte-identical when off.
             if not a.is_patrol:
-                pw = (e_p0 + e_cd * eff_speed ** 3) if adv > 1e-3 else e_p0
+                v_pw = (adv / dt) if (speed_control and dt > 0.0) else eff_speed
+                pw = (e_p0 + e_cd * v_pw ** 3) if adv > 1e-3 else e_p0
                 a.battery_wh -= pw * dt / 3600.0
                 if a.battery_wh <= 0.0:            # emergency landing: battery flat
                     if flow_block:
