@@ -106,6 +106,11 @@ DEFAULT_Z_VALUE = 0.0
 # congested centre. 0 disables the ring (obstacles may touch the border).
 DEFAULT_BORDER_MARGIN_M = 100.0
 
+# Default random seed (used when --seed is not given). Either a fixed integer
+# (as a string, e.g. "1" -- reproducible) or a chip-clock keyword
+# (pc_time / time / clock / random / auto / now -- a fresh seed each run).
+DEFAULT_SEED = "1"
+
 LABEL_NONE = "NONE"
 PREFIX_NONE = "NONE"
 
@@ -586,7 +591,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--seed",
         type=str,
-        default="1",
+        default=DEFAULT_SEED,
         help="random seed: an integer (reproducible), or a clock keyword "
              "(pc_time / time / clock / random / auto / now) to draw a fresh "
              "seed from the chip's high-resolution counter each run.",
