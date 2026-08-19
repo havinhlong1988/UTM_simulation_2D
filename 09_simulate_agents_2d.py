@@ -2250,7 +2250,10 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
             y = round(float(xy[i, 1]), 1)
             cat = int(outb[i])
             h = int(bool(hold[i]))
-            rows.append([x, y, cat, h, aid, scls(spd[i])])
+            # row: [x, y, cat, hold, aid, spdclass, level]. `level` lets a focal
+            # page draw reference links only to SAME-level neighbours (the ones it
+            # can actually conflict with).
+            rows.append([x, y, cat, h, aid, scls(spd[i]), int(lev[i])])
             focal[aid].append([kg, x, y, cat, h, int(lev[i])])
         fdata.append(rows)
         cdata.append([[round(float(p[0]), 1), round(float(p[1]), 1)] for p in cf])
@@ -2270,10 +2273,20 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
     levels = {"n": int(pget(params, "FLIGHT_LEVELS", 4)),
               "base_z": float(pget(params, "BASE_LEVEL_M", 60.0)),
               "sep": float(pget(params, "LEVEL_SEP_M", 30.0))}
+    # inter-agent reference links (focal page): required same-lane gap per speed
+    # class (index matches spdclass in each frame row), the floor, and the
+    # proximity radius within which a "reference" link to the focal agent is drawn.
+    _hw = float(pget(params, "TIME_HEADWAY_S", 30.0))
+    _flr = float(pget(params, "SEPARATION_M", 80.0))
+    _gp = [max(_hw * (c / 3.6), _flr) for c in cls_desc]
+    link_meta = {"gap_by_class": [int(round(g)) for g in _gp],
+                 "sep_floor_m": int(round(_flr)),
+                 "link_watch_m": int(round(1.6 * max(_gp)))}
     net_json = json.dumps({"bbox": bbox, "lanes": lanes, "rings": rings,
                            "tn": tn_pts, "objs": objs,
                            "costmap": costmap, "times": times, "frames": fdata,
-                           "conflicts": cdata, "levels": levels}, separators=(",", ":"))
+                           "conflicts": cdata, "levels": levels,
+                           "meta": link_meta}, separators=(",", ":"))
     (ar / "network.js").write_text("window.NETWORK=" + net_json + ";\n", encoding="utf-8")
 
     mrec = {}
@@ -2314,7 +2327,8 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
                  "flight_time_s": (times[k1] - times[k0]) if fo else 0.0, "route_len_m": 0.0,
                  "flown_m": 0.0, "n_holds": 0, "hold_s": 0.0, "energy_wh": 0.0,
                  "battery_end_pct": 0.0, "completed": True, "battery_dead": False}
-        F = {"aid": int(aid), "focal": fo, "stats": s}
+        F = {"aid": int(aid), "focal": fo, "stats": s,
+             "fcls": scls(s["speed_kmh"])}   # focal speed class -> its required gap
         html = (_AGENT_HTML_TEMPLATE
                 .replace("__AID__", str(aid))
                 .replace("__F__", json.dumps(F, separators=(",", ":"))))
@@ -2356,7 +2370,7 @@ _AGENT_HTML_TEMPLATE = r"""<!DOCTYPE html>
   button.sec{background:#33405a;} input[type=range]{width:100%;} label.sp{font-size:13px;color:var(--muted);}
 </style></head><body>
 <header><h1>Agent __AID__ &mdash; route replay</h1>
-  <div class="sub"><a href="index.html">&larr; all agents</a> &nbsp; <b style="color:#e11">&#9670; big red diamond</b> = this agent; small dots = other agents sharing the air; <b style="color:#8e2fb8">route forward = purple</b>, <b style="color:#12246b">backward = navy</b>; green/red = start/end; amber circle = holding/waiting; red star = conflict.</div>
+  <div class="sub"><a href="index.html">&larr; all agents</a> &nbsp; <b style="color:#e11">&#9670; big red diamond</b> = this agent; small dots = other agents sharing the air; lines = this agent's <b style="color:#4a80d6">reference links</b> to same-level neighbours (<b style="color:#e23b3b">red = too close</b>); <b style="color:#8e2fb8">route forward = purple</b>, <b style="color:#12246b">backward = navy</b>; green/red = start/end; amber circle = holding/waiting; red star = conflict.</div>
 </header>
 <div class="wrap">
   <div class="stage"><canvas id="cv" width="900" height="900"></canvas></div>
@@ -2369,8 +2383,10 @@ _AGENT_HTML_TEMPLATE = r"""<!DOCTYPE html>
           <option value="0.25">0.25&times;</option><option value="0.5">0.5&times;</option>
           <option value="1" selected>1&times;</option><option value="2">2&times;</option>
           <option value="4">4&times;</option><option value="8">8&times;</option></select></label>
-        <label class="sp"><input type="checkbox" id="cmtoggle" checked> costmap</label></div>
+        <label class="sp"><input type="checkbox" id="cmtoggle" checked> costmap</label>
+        <label class="sp"><input type="checkbox" id="linktoggle" checked> interactions</label></div>
       <div class="stat"><span>Other agents now</span><b id="near">0</b></div>
+      <div class="stat"><span>Too-close now</span><b id="tclose" style="color:#e23b3b">0</b></div>
       <div class="controls"><input type="range" id="scrub" min="0" value="0" step="1"></div></div>
     <div class="card" id="info"></div>
   </div>
@@ -2409,6 +2425,7 @@ function buildCostmap(){ const CM=NET.costmap; if(!CM) return;
   cmCanvas=off; }
 buildCostmap();
 let showCostmap=!!NET.costmap;
+let showFLinks=true;    // draw this agent's reference links to same-level neighbours
 
 function bg(){
   ctx.clearRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
@@ -2466,6 +2483,29 @@ function others(kg,f){ const cur=FR[kg]||[]; let nxt=null, n=0;
     } }
   for(const c of (CONF[kg]||[])) star(TX(c[0]),TY(c[1]),6);
   return n; }
+// this agent's reference links: a line from the focal agent (fx,fy at level flev)
+// to every SAME-level neighbour within the proximity radius -- red + thick when
+// closer than the required same-lane gap (the larger of the two speed-based
+// gaps), else a faint blue "keeping separation" link. Returns the too-close count.
+function focalLinks(fx,fy,flev,kg,f){
+  const M=NET.meta||{}, watch=M.link_watch_m||800, floor=M.sep_floor_m||80, gaps=M.gap_by_class||[];
+  const cur=FR[kg]||[]; let nxt=null, viol=0;
+  if(f>0 && kg+1<FR.length){ nxt=new Map(); for(const q of FR[kg+1]) nxt.set(q[4],q); }
+  for(const r of cur){
+    if(r[4]===F.aid) continue;
+    const rlev = (r.length>6)?(r[6]|0):0;
+    if(rlev!==flev) continue;                 // different level: vertically separated
+    let px=r[0],py=r[1];
+    if(nxt){ const q=nxt.get(r[4]); if(q){ px=r[0]+(q[0]-r[0])*f; py=r[1]+(q[1]-r[1])*f; } }
+    const d=Math.hypot(fx-px,fy-py);
+    if(d>watch) continue;
+    const req=Math.max(gaps[F.fcls]||floor, gaps[r[5]]||floor);
+    const fade=Math.max(0.05,1-d/watch);
+    if(d<req){ viol++; ctx.strokeStyle=`rgba(226,59,59,${Math.min(0.95,0.5+0.45*fade)})`; ctx.lineWidth=2.4; }
+    else { ctx.strokeStyle=`rgba(74,128,214,${0.22+0.45*fade})`; ctx.lineWidth=1.4; }
+    ctx.beginPath(); ctx.moveTo(TX(fx),TY(fy)); ctx.lineTo(TX(px),TY(py)); ctx.stroke();
+  }
+  return viol; }
 function draw(p){
   bg(); drawPath();
   const i=Math.min(Math.floor(p),FO.length-1), f=p-Math.floor(p);
@@ -2473,6 +2513,9 @@ function draw(p){
   const kg=a[0], cont=(b[0]===kg+1), nf=cont?f:0;
   const n=others(kg,nf);
   const x=a[1]+(b[1]-a[1])*f, y=a[2]+(b[2]-a[2])*f, X=TX(x), Y=TY(y);
+  const flev=a[5]|0;
+  const tc = showFLinks ? focalLinks(x,y,flev,kg,nf) : 0;
+  const tcl=document.getElementById('tclose'); if(tcl) tcl.textContent = showFLinks ? tc : '-';
   const holding=!!a[4];
   if(holding){ // HOLD/WAIT status: an amber circle COVERING the current agent
     ctx.fillStyle='#ff8c1a'; ctx.beginPath(); ctx.arc(X,Y,15,0,7); ctx.fill();
@@ -2504,6 +2547,9 @@ scrub.oninput=e=>{ pos=parseInt(e.target.value); playing=false; document.getElem
 const cmtoggle=document.getElementById('cmtoggle');
 if(cmtoggle){ cmtoggle.disabled=!NET.costmap; cmtoggle.checked=showCostmap;
   cmtoggle.onchange=e=>{ showCostmap=e.target.checked; redraw(); }; }
+const linktoggle=document.getElementById('linktoggle');
+if(linktoggle){ linktoggle.checked=showFLinks;
+  linktoggle.onchange=e=>{ showFLinks=e.target.checked; redraw(); }; }
 const S=F.stats;
 const row=(k,v)=>`<div class="stat"><span>${k}</span><b>${v}</b></div>`;
 document.getElementById('info').innerHTML='<h2>Mission</h2>'+

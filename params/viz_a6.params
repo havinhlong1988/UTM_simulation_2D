@@ -203,7 +203,7 @@ GIF_FPS          = 20
 MAKE_HTML       = True   # self-contained interactive 2D agents_animation.html
 # Per-agent route replays under output/09_agent_sim_2d/agent_route/ (one HTML per
 # agent + index.html) to inspect each agent's travel. MAX = -1 -> all agents.
-MAKE_AGENT_ROUTE_HTML = False
+MAKE_AGENT_ROUTE_HTML = True 
 AGENT_ROUTE_MAX           = -1
 AGENT_ROUTE_INCLUDE_PATROL = False
 MAKE_ANIMATION  = False  # matplotlib agents_animation.gif

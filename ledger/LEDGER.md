@@ -233,3 +233,19 @@ params/viz_a6.params (baseline_p1 + MAKE_HTML). Not a sim-dynamics change;
 baseline metrics unaffected. Static proof rendered from the embedded DATA.
 
 - NEXT: unchanged (phase1-A4-speed). Baton idle.
+
+## 2026-08-19T10:41:00+07:00 · host=linux · task=viz-agent-route-links · NOTE
+
+Per-agent route HTML (write_agent_routes / agent_route/agent_<id>.html + shared
+network.js + index.html) now also draws THIS agent's reference links: from the
+focal agent (big red diamond) to every SAME-level neighbour within the proximity
+radius -- red+thick when closer than the required gap, else faint blue. New
+"interactions" toggle + a "Too-close now" live counter. Per-frame rows in
+network.js gained a 7th field (level); network.js gained a `meta`
+(gap_by_class/sep_floor_m/link_watch_m); F gained `fcls` (focal speed class).
+Enable via MAKE_AGENT_ROUTE_HTML=True (params/viz_a6.params has it + MAKE_HTML).
+Generates one file per delivery agent (1000) + network.js. Verified in-browser
+(agent 500) and via static proof (agent 42: 11 links, 7 too-close). Viz only;
+no sim-dynamics change.
+
+- NEXT: unchanged (phase1-A4-speed). Baton idle.
