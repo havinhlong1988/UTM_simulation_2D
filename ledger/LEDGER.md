@@ -35,3 +35,14 @@ Phase −1 and Phase 0 complete on **mac**. State handed to the ledger.
    then run the first relay task.
 
 - NEXT: **handshake-baseline** (run on linux first to confirm env parity)
+
+## 2026-08-19T08:37:05+07:00 · host=linux · task=handshake-baseline · OK
+
+First linux shift. Env parity confirmed against frozen Phase-0 baseline (seed 12345):
+- n_completed 869 (ref 869) OK · gridlock False OK
+- min_same_lane_gap_m 62.875 (ref 62.88, ±1m) OK · conflict_samples 3999 (ref 3999) OK
+- [handshake] MATCH — env parity confirmed (utm conda env, ~/anaconda3/envs/utm).
+- Cross-machine numbers can now be trusted on linux.
+- NEXT: none `todo`. Phase-1 tasks (phase1-A5-tolling, -A4-speed, -A7-ring) are
+  `blocked` pending implementation (one param flag each, default off, vs baseline).
+  Baton released (idle).

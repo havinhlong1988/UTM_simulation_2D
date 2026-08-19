@@ -2,11 +2,11 @@
   "_doc": "Machine-readable relay state. baton = who is actively working (idle|mac|linux). Only one host works at a time; git push atomicity enforces it. Edited by ledger/relay.py (automation) or the /relay-resume Claude skill (interactive). Task status: todo=ready, blocked=not implemented yet, running, done.",
   "branch": "roundabout-corridor-tuning",
   "baton": "idle",
-  "last_host": "mac",
-  "next_task": "handshake-baseline",
-  "updated": "2026-08-18T23:30:00+07:00",
+  "last_host": "linux",
+  "next_task": null,
+  "updated": "2026-08-19T08:37:05+07:00",
   "queue": [
-    {"id": "handshake-baseline", "status": "todo",    "desc": "Both machines reproduce frozen Phase-0 baseline (seed 12345) before trusting cross-machine numbers"},
+    {"id": "handshake-baseline", "status": "done",    "desc": "Both machines reproduce frozen Phase-0 baseline (seed 12345) before trusting cross-machine numbers"},
     {"id": "phase1-A5-tolling",  "status": "blocked", "desc": "System-optimum tolling A/B behind TOLL_MODE flag (needs implementation)"},
     {"id": "phase1-A4-speed",    "status": "blocked", "desc": "Speed-control deconfliction A/B behind SPEED_CONTROL flag"},
     {"id": "phase1-A7-ring",     "status": "blocked", "desc": "Ring-entry metering A/B behind RING_METER flag (also lifts ring gap >= 80m, G1')"}
