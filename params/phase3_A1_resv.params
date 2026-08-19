@@ -233,3 +233,7 @@ DCB_CORRIDOR_SHARE  = 1.5
 # these lines differ from baseline_p1 (RESV_ROUTING is OFF by default in code).
 RESV_ROUTING   = True
 RESV_PENALTY_M = 8000.0
+
+# --- pin flags OFF: A6/A4 are now ON by default in the code; this
+#     config predates or excludes them, so keep its behaviour explicit ---
+SPEED_CONTROL          = False

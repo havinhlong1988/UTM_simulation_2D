@@ -224,3 +224,8 @@ RING_TRAVEL     = True
 # NOT metered (no extra entry holds -> no hover-drain battery cascade); only the
 # 2*pi*r wrap seam in ring car-following is fixed. A/B vs baseline_p0.
 RING_WRAP_FOLLOW = True
+
+# --- pin flags OFF: A6/A4 are now ON by default in the code; this
+#     config predates or excludes them, so keep its behaviour explicit ---
+DCB_MODE               = False
+SPEED_CONTROL          = False

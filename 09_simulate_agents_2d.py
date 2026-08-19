@@ -753,15 +753,17 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     # concurrency metering: minimum seconds between successive delivery launches
     # so departures are spread in time (fewer simultaneous crossings/conflicts).
     launch_spacing = float(pget(params, "LAUNCH_SPACING_S", 2.0))
-    # A6 DEMAND-CAPACITY BALANCING (default OFF -> baseline unchanged). The launch
-    # gate above is a single GLOBAL concurrency cap (n_active < max_concurrent);
-    # with 1000 missions dumped at t=0 it lets whichever corridor is at the queue
-    # head hog the airborne budget, piling agents onto a few origin corridors
-    # (peak_backlog=999 stays bound; A7/A5 could not move it). DCB meters each
-    # ORIGIN CORRIDOR to a fair-share airborne cap and round-robins deferred
+    # A6 DEMAND-CAPACITY BALANCING (**default ON** -- the KEPT config baked in; the
+    # frozen baselines set DCB_MODE=False explicitly to reproduce the old default).
+    # The launch gate above is a single GLOBAL concurrency cap (n_active <
+    # max_concurrent); with 1000 missions dumped at t=0 it lets whichever corridor
+    # is at the queue head hog the airborne budget, piling agents onto a few origin
+    # corridors (peak_backlog=999 stays bound; A7/A5 could not move it). DCB meters
+    # each ORIGIN CORRIDOR to a fair-share airborne cap and round-robins deferred
     # candidates to the back of the queue, so launches spread across corridors
     # (scheduling-level deconfliction, NASA-UTM style) -> fewer hot-node pileups.
-    dcb_mode = bool(pget(params, "DCB_MODE", False))
+    # A/B KEEP: completed +5.4%, holds -13%, battery_dead -38% vs the pre-DCB base.
+    dcb_mode = bool(pget(params, "DCB_MODE", True))
     # each corridor may hold at most dcb_share * (max_concurrent / n_origins)
     # airborne (slack > 1 lets demand imbalance still fill capacity); or set an
     # absolute DCB_CORRIDOR_CAP to override the derived value.
@@ -770,18 +772,20 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     dcb_n_origins = max(1, len({a.origin for a in agents if not a.is_patrol}))
     dcb_cap = dcb_cap_param if dcb_cap_param > 0 else \
         max(1, math.ceil(dcb_share * max_concurrent / dcb_n_origins))
-    # A4 SPEED CONTROL (default OFF -> baseline unchanged). Baseline car-following
-    # is bang-bang: run at full speed up to the hard (leader - sep) cap, then STOP
-    # (stop-and-go, and a stopped agent hovers). Speed control instead ramps the
-    # cruise speed DOWN over a band above the separation floor, so an agent
-    # decelerates early and keeps creeping instead of fully stopping -- smoother
-    # flow, fewer hard holds. Battery then drains at the agent's ACTUAL velocity
-    # (slow cruise costs less than full cruise), which baseline could not model
-    # because it only ever ran full-speed or hovered.
-    speed_control = bool(pget(params, "SPEED_CONTROL", False))
+    # A4 SPEED CONTROL (**default ON** -- the KEPT config baked in; the frozen
+    # baselines that predate A4 set SPEED_CONTROL=False explicitly). Baseline
+    # car-following is bang-bang: run at full speed up to the hard (leader - sep)
+    # cap, then STOP (stop-and-go, and a stopped agent hovers). Speed control
+    # instead ramps the cruise speed DOWN over a band above the separation floor,
+    # so an agent decelerates early and keeps creeping instead of fully stopping --
+    # smoother flow, fewer hard holds. Battery then drains at the agent's ACTUAL
+    # velocity (slow cruise costs less than full cruise), which the bang-bang model
+    # could not represent. A/B KEEP: makespan -4.2%, holds -38% on top of DCB.
+    speed_control = bool(pget(params, "SPEED_CONTROL", True))
     # width of the deceleration band, as a multiple of the required gap sep_of(a):
-    # speed ramps 0 (at the floor) -> full (at floor + band).
-    speed_ctrl_band = float(pget(params, "SPEED_CTRL_BAND_FACTOR", 1.0))
+    # speed ramps 0 (at the floor) -> full (at floor + band). 0.5 is the sweep knee
+    # (1.0 over-packs creeping agents -> conflicts up, G3 fails; 2.0 far worse).
+    speed_ctrl_band = float(pget(params, "SPEED_CTRL_BAND_FACTOR", 0.5))
     node_mutex = bool(pget(params, "NODE_MUTEX_ENABLE", False))
     node_approach = float(pget(params, "NODE_APPROACH_M", 50.0))
     obj_approach = float(pget(params, "OBJECTIVE_APPROACH_M", 120.0))

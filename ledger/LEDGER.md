@@ -341,3 +341,23 @@ total_hold 12772->6911 (-46%), n_battery_dead 123->75 (-39%), conflict 4006->404
 - NEXT: none queued (A-series done). Options for a future shift: proper
   schedule-following executor (unlocks A1/A2/A3), or accept baseline_p2 as final.
   Baton idle.
+
+## 2026-08-19T13:10:00+07:00 · host=linux · task=bake-defaults · NOTE
+
+Baked the KEPT config into script 09 as the code defaults (user: "gom tất cả các
+sửa đổi đưa vào script 09"): DCB_MODE default True, SPEED_CONTROL default True,
+SPEED_CTRL_BAND_FACTOR default 0.5 (DCB_CORRIDOR_SHARE default already 1.5).
+Killed/neutral flags (RING_METER, TOLL_MODE, RESV_ROUTING) stay default OFF. So a
+run with NO flags set == baseline_p2 (A6+A4).
+
+To keep every frozen/experiment config reproducing under the flipped defaults,
+pinned flags explicitly: baseline_p0 (DCB=False,SPEED=False), baseline_p1
+(SPEED=False), phase1_A5/A7/A7b (DCB=False,SPEED=False), phase2_A6_dcb
+(SPEED=False), phase3_A1_resv (SPEED=False). baseline_p2 / phase3_A4 already set
+both explicitly.
+
+VERIFIED (seed 12345): handshake baseline_p0 MATCH (869, gap 62.88, conflict
+3999); baseline_p1 905; baseline_p2 925; NAKED default (no flags) 925/5.85h/75 ==
+A6+A4. Nothing regressed; the improvements are now self-contained in 09.
+
+- NEXT: none. Baton idle.

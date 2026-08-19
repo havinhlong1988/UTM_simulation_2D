@@ -35,6 +35,14 @@ control), both ON.** Cumulative 5-seed median vs the original frozen baseline
 More delivered, far less holding, far fewer drones lost — at a contained latency
 cost (the demand-smoothing trade, partly bought back by A4).
 
+**Baked into the script.** The kept config is now the **default in
+`09_simulate_agents_2d.py`**: `DCB_MODE` and `SPEED_CONTROL` default ON
+(`DCB_CORRIDOR_SHARE=1.5`, `SPEED_CTRL_BAND_FACTOR=0.5`); the killed/neutral flags
+(`RING_METER`, `TOLL_MODE`, `RESV_ROUTING`) default OFF. A run with **no flags set
+reproduces `baseline_p2`**. The frozen baselines pin the flags explicitly
+(`baseline_p0`/experiment configs set them OFF) so they — and the env-parity
+handshake — still reproduce exactly.
+
 ---
 
 ## 2. Frozen baselines

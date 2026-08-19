@@ -218,3 +218,8 @@ PYVISTA_Z_PATROL   = 140.0     # altitude (m) of patrol agents
 
 # ---- Phase-0 baseline overrides (D1) : mutex OFF, ring one-way ON ----
 RING_TRAVEL     = True
+
+# --- pin flags OFF: A6/A4 are now ON by default in the code; this
+#     config predates or excludes them, so keep its behaviour explicit ---
+DCB_MODE               = False
+SPEED_CONTROL          = False

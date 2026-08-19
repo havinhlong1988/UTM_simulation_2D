@@ -226,3 +226,8 @@ RING_TRAVEL     = True
 # the frozen Phase-0 baseline. Does NOT touch ring spacing / battery model.
 TOLL_MODE         = True
 TOLL_MARGINAL_MULT = 2.0       # SO toll for linear congestion = UE * (1+beta), beta=1
+
+# --- pin flags OFF: A6/A4 are now ON by default in the code; this
+#     config predates or excludes them, so keep its behaviour explicit ---
+DCB_MODE               = False
+SPEED_CONTROL          = False

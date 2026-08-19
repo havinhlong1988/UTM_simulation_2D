@@ -226,3 +226,7 @@ RING_TRAVEL     = True
 # Phase-3+ improvements A/B against THIS, not baseline_p0. A6 is the only delta.
 DCB_MODE            = True
 DCB_CORRIDOR_SHARE  = 1.5
+
+# --- pin flags OFF: A6/A4 are now ON by default in the code; this
+#     config predates or excludes them, so keep its behaviour explicit ---
+SPEED_CONTROL          = False

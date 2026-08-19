@@ -227,3 +227,7 @@ RING_TRAVEL     = True
 DCB_MODE            = True
 DCB_CORRIDOR_SHARE  = 1.5      # efficiency knee (5-seed sweep): -38% deaths, +5.4% completed, makespan 6.22h
 # DCB_CORRIDOR_CAP  = 0        # >0 overrides the derived cap with an absolute one
+
+# --- pin flags OFF: A6/A4 are now ON by default in the code; this
+#     config predates or excludes them, so keep its behaviour explicit ---
+SPEED_CONTROL          = False
