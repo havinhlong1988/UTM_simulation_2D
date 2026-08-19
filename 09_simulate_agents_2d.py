@@ -1783,12 +1783,16 @@ def write_html(net: Network, frames, params, sep_eff, out_html: Path):
         return cls_idx.get(int(round(v)), len(cls_desc) - 1)
     times = [round(float(t), 1) for (t, *_r) in frames]
     fdata, cdata = [], []
-    for (_t, xy, outb, hold, aids, spd, cf, *_) in frames:
+    for (_t, xy, outb, hold, aids, spd, cf, lev) in frames:
         rows = []
         for i in range(len(xy)):
+            # per-agent row: [x, y, cat, hold, aid, spdclass, level]. `level` lets
+            # the viewer draw inter-agent reference links only between agents that
+            # actually interact (same flight level -- different levels are
+            # vertically separated and never conflict).
             rows.append([round(float(xy[i, 0]), 1), round(float(xy[i, 1]), 1),
                          int(outb[i]), int(bool(hold[i])), int(aids[i]),
-                         scls_of(spd[i])])
+                         scls_of(spd[i]), int(lev[i])])
         fdata.append(rows)
         cdata.append([[round(float(p[0]), 1), round(float(p[1]), 1)] for p in cf])
 
@@ -1826,6 +1830,12 @@ def write_html(net: Network, frames, params, sep_eff, out_html: Path):
             "headway_s": round(_headway_s, 1),
             "gap_min_m": int(round(min(_gaps))),
             "gap_max_m": int(round(max(_gaps))),
+            # inter-agent reference links: required same-lane gap per speed class
+            # (index matches spdclass in each frame row), the absolute floor, and
+            # the proximity radius within which a "reference" link is drawn.
+            "gap_by_class": [int(round(g)) for g in _gaps],
+            "sep_floor_m": int(round(_sep_floor)),
+            "link_watch_m": int(round(1.6 * max(_gaps))),
             "map_w_m": int(round(bbox[2] - bbox[0])),
             "map_h_m": int(round(bbox[3] - bbox[1])),
             "shift_h": float(pget(params, "SHIFT_HOURS", 1.0)),
@@ -1906,6 +1916,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
           </select>
         </label>
         <label class="sp"><input type="checkbox" id="cmtoggle" checked> costmap</label>
+        <label class="sp"><input type="checkbox" id="linktoggle" checked> interactions</label>
       </div>
       <div class="controls"><input type="range" id="scrub" min="0" value="0" step="1"></div>
     </div>
@@ -1917,6 +1928,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
       <div class="stat"><span>Inbound &rarr; DB</span><b id="s_in">0</b></div>
       <div class="stat"><span>Patrol</span><b id="s_pat">0</b></div>
       <div class="stat"><span>Conflicts</span><b id="s_conf" style="color:red">0</b></div>
+      <div class="stat"><span>Too-close pairs</span><b id="s_link" style="color:#e23b3b">0</b></div>
     </div>
     <div class="card">
       <h2>Legend</h2>
@@ -1931,6 +1943,11 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         <span><span class="dot" style="background:#7b3fbf"></span>patrol</span>
         <span><span class="ring"></span>holding</span>
         <span><span style="color:red">&#9733;</span> conflict</span>
+      </div>
+      <div class="legend" style="margin-top:6px">
+        <span><b>interactions (same level):</b></span>
+        <span><span style="display:inline-block;width:16px;height:0;border-top:2px solid #e23b3b;margin-right:5px;vertical-align:3px"></span>too close (&lt; required gap)</span>
+        <span><span style="display:inline-block;width:16px;height:0;border-top:1px solid #6f93c8;margin-right:5px;vertical-align:3px"></span>nearby / keeping separation</span>
       </div>
       <div class="legend" style="margin-top:6px">
         <span><b>background = slowness:</b></span>
@@ -1985,6 +2002,7 @@ function buildCostmap(){
 }
 buildCostmap();
 let showCostmap = !!DATA.costmap;
+let showLinks = true;    // draw inter-agent reference links (same-level proximity)
 
 function drawNetwork(){
   ctx.clearRect(0,0,W,H);
@@ -2052,16 +2070,25 @@ function draw(k, f){
   let air=0,hold=0,out=0,inb=0,pat=0;
   let nxt=null;
   if(f>0 && k+1<N){ nxt=new Map(); for(const q of frameAt(k+1)) nxt.set(q[4], q); }
+  // pass 1: interpolated world position for every airborne agent this frame
+  const AN=[];
   for(const r of frameAt(k)){
     let px=r[0], py=r[1];
     if(nxt){ const q=nxt.get(r[4]); if(q){ px=r[0]+(q[0]-r[0])*f; py=r[1]+(q[1]-r[1])*f; } }
-    const X=TX(px), Y=TY(py); air++;
-    if(r[2]===1) out++; else if(r[2]===0) inb++; else pat++;
-    ctx.fillStyle = COL[r[2]];
-    if(r[2]===2){ ctx.beginPath(); ctx.arc(X,Y,5.5,0,7); ctx.fill();
+    AN.push({px, py, cat:r[2], hold:r[3], cls:r[5], lev:(r[6]|0)});
+  }
+  // inter-agent reference links (drawn UNDER the glyphs): every agent related to
+  // the same-level neighbours whose separation constrains its motion.
+  if(showLinks) drawLinks(AN); else { const el=document.getElementById('s_link'); if(el) el.textContent='-'; }
+  // pass 2: draw the agent glyphs on top of the links
+  for(const a of AN){
+    const X=TX(a.px), Y=TY(a.py); air++;
+    if(a.cat===1) out++; else if(a.cat===0) inb++; else pat++;
+    ctx.fillStyle = COL[a.cat];
+    if(a.cat===2){ ctx.beginPath(); ctx.arc(X,Y,5.5,0,7); ctx.fill();
       ctx.lineWidth=0.9; ctx.strokeStyle='rgba(0,0,0,.6)'; ctx.stroke(); }
-    else shape(X,Y,r[5],4.2);          // r[5] = speed class 0/1/2
-    if(r[3]){ hold++; ctx.strokeStyle='#ff8c1a'; ctx.lineWidth=2.0;
+    else shape(X,Y,a.cls,4.2);          // a.cls = speed class 0/1/2
+    if(a.hold){ hold++; ctx.strokeStyle='#ff8c1a'; ctx.lineWidth=2.0;
       ctx.beginPath(); ctx.arc(X,Y,7.5,0,7); ctx.stroke(); }
   }
   // conflicts: red stars (loss of time separation)
@@ -2079,6 +2106,34 @@ function draw(k, f){
   document.getElementById('s_in').textContent=inb;
   document.getElementById('s_pat').textContent=pat;
   document.getElementById('s_conf').textContent=cf.length;
+}
+
+// inter-agent reference links: for each pair of SAME-level agents within the
+// proximity radius, draw a line -- red (and thicker) when they are closer than
+// the required same-lane gap (the larger of the two speed-based gaps), else a
+// faint blue "keeping separation" link. Distances are in world metres (agent
+// coords are metres), so thresholds compare directly. Also updates the
+// too-close-pairs counter.
+function drawLinks(AN){
+  const watch=DATA.meta.link_watch_m||500, floor=DATA.meta.sep_floor_m||80;
+  const gaps=DATA.meta.gap_by_class||[];
+  let viol=0;
+  for(let i=0;i<AN.length;i++){
+    const a=AN[i];
+    for(let j=i+1;j<AN.length;j++){
+      const b=AN[j];
+      if(a.lev!==b.lev) continue;                 // different level: vertically separated
+      const dx=a.px-b.px, dy=a.py-b.py;
+      const d=Math.hypot(dx,dy);
+      if(d>watch) continue;
+      const req=Math.max(gaps[a.cls]||floor, gaps[b.cls]||floor);
+      const fade=Math.max(0.05, 1-d/watch);
+      if(d<req){ viol++; ctx.strokeStyle=`rgba(226,59,59,${Math.min(0.95,0.45+0.5*fade)})`; ctx.lineWidth=2.0; }
+      else { ctx.strokeStyle=`rgba(74,128,214,${0.18+0.42*fade})`; ctx.lineWidth=1.1; }
+      ctx.beginPath(); ctx.moveTo(TX(a.px),TY(a.py)); ctx.lineTo(TX(b.px),TY(b.py)); ctx.stroke();
+    }
+  }
+  const el=document.getElementById('s_link'); if(el) el.textContent=viol;
 }
 
 function star(cx,cy,R){
@@ -2118,6 +2173,9 @@ scrub.oninput=e=>{ tpos=parseInt(e.target.value); playing=false;
 const cmtoggle=document.getElementById('cmtoggle');
 if(cmtoggle){ cmtoggle.disabled=!DATA.costmap; cmtoggle.checked=showCostmap;
   cmtoggle.onchange=e=>{ showCostmap=e.target.checked; redraw(); }; }
+const linktoggle=document.getElementById('linktoggle');
+if(linktoggle){ linktoggle.checked=showLinks;
+  linktoggle.onchange=e=>{ showLinks=e.target.checked; redraw(); }; }
 
 document.getElementById('meta').innerHTML =
   `<h2>Scenario</h2>`+

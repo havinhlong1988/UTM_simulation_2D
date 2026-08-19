@@ -214,3 +214,22 @@ FROZEN new baseline **baseline_p1** = baseline_p0 + DCB_MODE (share=1.5):
 
 - NEXT: **phase1-A4-speed** (blocked) -- speed control vs baseline_p1 (DCB already
   on), to smooth stop-and-go and claw back some makespan/wait. Baton released (idle).
+
+## 2026-08-19T10:31:00+07:00 · host=linux · task=viz-interaction-links · NOTE
+
+HTML animation (write_html / agents_animation.html) now draws INTER-AGENT
+REFERENCE LINKS: per frame, every pair of SAME-flight-level agents within a
+proximity radius (meta.link_watch_m = 1.6x max gap = 800m) gets a line -- red +
+thick when closer than the required same-lane gap (max of the two speed-based
+gaps, meta.gap_by_class), else a faint blue "keeping separation" link (alpha
+fades with distance). Same-level only (different levels are vertically separated
+-> never conflict), mirroring the sim's conflict model. New "interactions"
+checkbox toggles them; a "Too-close pairs" live counter shows red-link count.
+Per-agent row gained a 7th field (flight level). Verified in-browser: busiest
+frame (144 airborne) = 213 links, 85 too-close.
+
+Generate: params with MAKE_HTML=True (baseline_* have it OFF). Helper
+params/viz_a6.params (baseline_p1 + MAKE_HTML). Not a sim-dynamics change;
+baseline metrics unaffected. Static proof rendered from the embedded DATA.
+
+- NEXT: unchanged (phase1-A4-speed). Baton idle.
