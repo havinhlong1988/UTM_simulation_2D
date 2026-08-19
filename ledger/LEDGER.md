@@ -145,3 +145,46 @@ leave peak_backlog=999 untouched. The bottleneck is demand/launch scheduling.
 - NEXT: **phase2-A6-demand** (blocked; needs implementation) -- replace the
   n_active<max_concurrent launch gate with a per-corridor slot/capacity check.
   Baton released (idle).
+
+## 2026-08-19T09:48:24+07:00 · host=linux · task=phase2-A6-demand · KEEP ★
+
+Implemented A6 demand-capacity balancing behind `DCB_MODE` (default OFF ->
+baseline byte-identical). The launch gate was a single GLOBAL cap
+(n_active<max_concurrent); with 1000 missions at t=0 it lets the queue-head
+corridor hog the airborne budget. DCB meters each ORIGIN corridor to a fair-share
+airborne cap (cap = dcb_share * max_concurrent / n_origins) and round-robins
+corridor-capped candidates to the BACK of the queue, spreading launches across
+corridors. Code: `dcb_mode`/`dcb_share`/`dcb_cap` params + a per-origin gate in
+the launch selection loop (active_per_key recomputed each tick from
+active_agents, no cross-code bookkeeping). Config: `params/phase2_A6_dcb.params`
+(DCB_MODE=True, share=1.0 = equal fair share). A/B: `ledger/tasks/phase2-A6-demand.sh`,
+5 D2 seeds, `phase2/A6/metrics/`.
+
+A/B result (median of 5 seeds, A6 share=1.0 vs frozen baseline):
+- n_completed        877 -> 947   (+8.0%)  ★ throughput up
+- total_hold_minutes 12772 -> 9093 (-28.8%) ★ clears the -15% goal
+- n_battery_dead     123 -> 53    (-56.9%) G3 improves massively
+- conflict_samples   4006 -> 3497 (-12.7%)
+- n_reroutes         1063 -> 742  (-30.2%)
+- min_same_lane_gap  65.8 -> 65.75 (flat, not-worse) · max_agents_on_a_lane 6 (flat)
+- gridlock False (G2) · peak_backlog 999 (inherent t=0 dump, unchanged)
+TRADEOFF (launch deferral, same cause both):
+- mean_wait_for_leg_s 6119 -> 7664 (+25.3%)
+- sim_end_hours (makespan) 5.12 -> 7.43 (+45%)  <- allowed by §5 (throughput up)
+
+VERDICT KEEP: all hard gates pass; BOTH ★ goals clear (completions +8%, holds
+-29%); every safety/flow metric improves. Cost is latency: DCB throttles launches
+to sustainable network capacity, so the operation runs longer but completes more
+and loses far fewer drones. This is the first KEEP after A7/A7b (KILL) and A5
+(NEUTRAL), and confirms the whole diagnosis -- the bottleneck was LAUNCH
+SCHEDULING, not ring spacing or route choice.
+
+Sensitivity (DCB_CORRIDOR_SHARE, 2 seeds): share=1.0 (equal fair share) is the
+sweet spot; share=1.5 is gentler (completed +5.4%, holds -12.6%, dead 76,
+mean_wait +5.5%) -- a lower-latency alternative; share=2.5 reverts to baseline
+(loose cap = no metering), confirming the mechanism.
+
+- NEXT: **phase1-A4-speed** (blocked) -- speed control to smooth stop-and-go;
+  best tested STACKED on A6 to try to recover some of the makespan/wait cost.
+  Also: consider promoting the A6 config to a new frozen baseline for phase-3+.
+  Baton released (idle).

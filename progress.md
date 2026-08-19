@@ -172,7 +172,22 @@ FLOW_MODE=spacing. Machine copy: `phase0/baseline_summary.json`.
    **Cumulative:** A7/A7b/A5 all leave `peak_backlog=999` untouched → the
    bottleneck is demand/launch scheduling → **A6 (DCB) is the demonstrated lever.**
 
-**Code change made:** exactly one — the same-lane-gap `s_offset` fix (measurement
+9. **A6 demand-capacity balancing — VERDICT KEEP ★ (the winner).** Behind
+   `DCB_MODE` (default OFF). Meters launches per origin corridor to a fair-share
+   airborne cap (`cap = DCB_CORRIDOR_SHARE · max_concurrent / n_origins`) and
+   round-robins corridor-capped candidates to the back of the queue, spreading the
+   fleet instead of draining one corridor first — a per-origin gate in the launch
+   selection loop [:~1120](09_simulate_agents_2d.py:1120). Result (5-seed median,
+   share=1.0 = equal fair share): **n_completed +8.0% (877→947), total_hold −28.8%
+   (clears the −15% ★), n_battery_dead −56.9% (123→53), conflicts −12.7%, reroutes
+   −30.2%**; all hard gates pass, gap not-worse. **Tradeoff (launch deferral):**
+   mean_wait +25.3%, makespan `sim_end_hours` 5.12→7.43 h (+45%) — allowed by §5
+   because throughput is up. DCB throttles launches to sustainable capacity, so the
+   op runs longer but completes more and loses far fewer drones. `share=1.5` is a
+   lower-latency alternative (+5.4% completed, −12.6% holds, mean_wait +5.5%);
+   `share=2.5` ≈ baseline (confirms the mechanism). Flag kept, default OFF; **the
+   A6 config is a candidate new frozen baseline.** Files:
+   `params/phase2_A6_dcb.params`, `ledger/tasks/phase2-A6-demand.sh`, `phase2/A6/metrics/`.
 
 **Code change made:** exactly one — the same-lane-gap `s_offset` fix (measurement
 only; **no change to simulation dynamics**; `s_offset=0` for ordinary legs so their
@@ -237,13 +252,16 @@ incl. a `python-docx` venv used only to regenerate the `.docx`).
   end here** (see §4.7). All ring flags default OFF.
 - **DONE — A5 tolling (VERDICT: NEUTRAL):** safe (all hard gates pass) but no
   benefit — `peak_backlog=999` untouched, so routing tolling can't help (§4.8).
-- **Next → `phase2-A6-demand` (promoted).** Three interventions (A7, A7b, A5) now
-  all leave `peak_backlog=999` fixed, empirically confirming the binding
-  constraint is the **launch backlog**, not ring spacing or route choice.
-  Implement demand-capacity balancing: replace the `n_active < max_concurrent`
-  launch gate ([:1099](09_simulate_agents_2d.py:1099)) with a per-corridor
-  slot/capacity check (doc A6, §2 Phase 2). `A4` (speed) is deprioritised — also a
-  tactical lever unlikely to move the launch wall.
+- **DONE — A6 demand-capacity balancing (VERDICT: KEEP ★, the winner):** the first
+  intervention that clears the bar — completions +8%, holds −28.8%, deaths −57%,
+  conflicts −12.7%, reroutes −30% — at a latency cost (mean_wait +25%, makespan
+  +45%). See §4.9. `DCB_MODE`, default OFF; A6 config is a candidate new baseline.
+- **Next options:**
+  1. **Promote the A6 config to a new frozen baseline** and re-run the 5-seed
+     freeze, so phase-3+ A/Bs measure against DCB-on.
+  2. **`phase1-A4-speed`** (speed control) — smooth stop-and-go to try to recover
+     some of A6's makespan/wait cost; best tested **stacked on A6**.
+  3. **A1 space-time reservation** (doc #1) — the larger structural rewrite.
 
 ---
 

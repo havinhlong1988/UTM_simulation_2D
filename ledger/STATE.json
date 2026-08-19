@@ -3,14 +3,14 @@
   "branch": "roundabout-corridor-tuning",
   "baton": "idle",
   "last_host": "linux",
-  "next_task": "phase2-A6-demand",
-  "updated": "2026-08-19T09:27:42+07:00",
+  "next_task": "phase1-A4-speed",
+  "updated": "2026-08-19T09:48:24+07:00",
   "queue": [
     {"id": "handshake-baseline", "status": "done",    "desc": "Both machines reproduce frozen Phase-0 baseline (seed 12345) before trusting cross-machine numbers"},
     {"id": "phase1-A7-ring",     "status": "done",    "verdict": "KILL", "desc": "Ring-entry metering (RING_METER=wrap-follow+merge-meter). Lifts ring gap 65.8->94.8m (G1' PASS) but G3 FAILS: n_battery_dead 123->153 (entry holds -> hover drain); holds +29%. Flag kept, default OFF."},
     {"id": "phase1-A7b-ring",    "status": "done",    "verdict": "KILL", "desc": "Isolation: RING_WRAP_FOLLOW only (no merge meter). WORSE than A7: gap 76.1m median but min 65.8 (G1' FAIL), n_battery_dead 240 (G3 FAIL, worse), completed 760. Ring-spacing enforcement is a dead end under this demand."},
-    {"id": "phase1-A5-tolling",  "status": "done",    "verdict": "NEUTRAL", "desc": "System-optimum marginal-cost tolling (TOLL_MODE, mult 2x). All hard gates PASS (G2/G3/G1' ok) but NO benefit: holds +3.2%, completed +2, max_agents_on_a_lane flat (6), peak_backlog 999 unchanged. Higher mult (6x) also flat / slightly worse battery. Ineffective because binding constraint is launch backlog, not routing. Flag kept, default OFF."},
-    {"id": "phase2-A6-demand",   "status": "blocked", "desc": "Demand-capacity balancing (launch-slot scheduling by corridor capacity). THE demonstrated lever: A7/A7b/A5 all left peak_backlog=999 untouched -> throughput is launch-backlog-bound, not ring- or routing-bound. Replace n_active<max_concurrent at launch:~1099 with corridor slot/capacity check. Doc A6 (#2), progress.md Phase 2."},
-    {"id": "phase1-A4-speed",    "status": "blocked", "desc": "Speed-control deconfliction A/B behind SPEED_CONTROL flag (move-loop cap). Lower priority: also a tactical/routing lever, unlikely to move the launch-backlog wall."}
+    {"id": "phase1-A5-tolling",  "status": "done",    "verdict": "NEUTRAL", "desc": "System-optimum marginal-cost tolling (TOLL_MODE, mult 2x). All hard gates PASS but NO benefit: holds +3.2%, completed +2, peak_backlog 999 unchanged. Ineffective because binding constraint is launch backlog, not routing. Flag kept, default OFF."},
+    {"id": "phase2-A6-demand",   "status": "done",    "verdict": "KEEP", "desc": "Demand-capacity balancing (DCB_MODE, per-origin-corridor fair-share airborne cap, share=1.0). THE lever. 5-seed vs baseline: completed +8.0%, holds -28.8%, battery_dead -56.9%, conflicts -12.7%, reroutes -30.2% (all hard gates + both ★ goals). TRADEOFF: throttles launches -> mean_wait +25.3%, makespan sim_end_hours 5.12->7.43h (+45%); allowed by §5 since throughput up. share=1.5 is a lower-latency alt (completed +5.4%, holds -12.6%, mean_wait +5.5%). Flag kept, default OFF; A6 config = candidate new baseline."},
+    {"id": "phase1-A4-speed",    "status": "blocked", "desc": "Speed-control deconfliction A/B behind SPEED_CONTROL flag (interpolate cap/new_s in move loop instead of hard hold). Now most promising remaining: could recover some of A6's makespan/wait cost by smoothing stop-and-go. Best tested STACKED on A6 (DCB_MODE+SPEED_CONTROL)."}
   ]
 }

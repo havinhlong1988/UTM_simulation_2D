@@ -753,6 +753,23 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     # concurrency metering: minimum seconds between successive delivery launches
     # so departures are spread in time (fewer simultaneous crossings/conflicts).
     launch_spacing = float(pget(params, "LAUNCH_SPACING_S", 2.0))
+    # A6 DEMAND-CAPACITY BALANCING (default OFF -> baseline unchanged). The launch
+    # gate above is a single GLOBAL concurrency cap (n_active < max_concurrent);
+    # with 1000 missions dumped at t=0 it lets whichever corridor is at the queue
+    # head hog the airborne budget, piling agents onto a few origin corridors
+    # (peak_backlog=999 stays bound; A7/A5 could not move it). DCB meters each
+    # ORIGIN CORRIDOR to a fair-share airborne cap and round-robins deferred
+    # candidates to the back of the queue, so launches spread across corridors
+    # (scheduling-level deconfliction, NASA-UTM style) -> fewer hot-node pileups.
+    dcb_mode = bool(pget(params, "DCB_MODE", False))
+    # each corridor may hold at most dcb_share * (max_concurrent / n_origins)
+    # airborne (slack > 1 lets demand imbalance still fill capacity); or set an
+    # absolute DCB_CORRIDOR_CAP to override the derived value.
+    dcb_share = float(pget(params, "DCB_CORRIDOR_SHARE", 1.5))
+    dcb_cap_param = int(pget(params, "DCB_CORRIDOR_CAP", 0))
+    dcb_n_origins = max(1, len({a.origin for a in agents if not a.is_patrol}))
+    dcb_cap = dcb_cap_param if dcb_cap_param > 0 else \
+        max(1, math.ceil(dcb_share * max_concurrent / dcb_n_origins))
     node_mutex = bool(pget(params, "NODE_MUTEX_ENABLE", False))
     node_approach = float(pget(params, "NODE_APPROACH_M", 50.0))
     obj_approach = float(pget(params, "OBJECTIVE_APPROACH_M", 120.0))
@@ -1117,19 +1134,35 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             slots = max_concurrent - n_active
             per_tick = max(1, int(dt / launch_spacing)) if launch_spacing > 0 else 10 ** 9
             examined, requeue, launched = 0, [], 0
+            dcb_deferred: list = []
+            if dcb_mode:
+                # current airborne count per origin corridor (recomputed each tick
+                # so no cross-code bookkeeping is needed on completion/death)
+                active_per_key: dict = {}
+                for ag in active_agents:
+                    if not ag.is_patrol:
+                        active_per_key[ag.origin] = active_per_key.get(ag.origin, 0) + 1
             while (waiting and n_active < max_concurrent and examined < slots * 3 + 40
                    and launched < per_tick):
                 a = waiting.popleft(); n_waiting -= 1; examined += 1
+                if dcb_mode and not a.is_patrol and \
+                        active_per_key.get(a.origin, 0) >= dcb_cap:
+                    dcb_deferred.append(a)         # corridor at capacity: rotate to back
+                    continue
                 if not a.is_patrol and not plan_mission(a):
                     continue                       # unreachable: drop (shouldn't happen)
                 if enter_leg(a, 0):
                     a.depart_t = t
                     active_agents.append(a); n_active += 1; moved = True
                     launched += 1; last_launch_t = t
+                    if dcb_mode:
+                        active_per_key[a.origin] = active_per_key.get(a.origin, 0) + 1
                 else:
                     requeue.append(a)              # first leg busy: try again later
             for a in reversed(requeue):
                 waiting.appendleft(a); n_waiting += 1
+            for a in dcb_deferred:                 # capped corridors to the BACK (fair rotation)
+                waiting.append(a); n_waiting += 1
 
         for a in active_agents:
             a.holding = False
