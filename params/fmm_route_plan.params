@@ -56,3 +56,15 @@ CONFLICT_FROM_COSTMAP = True
 # Routes / output -----------------------------------------------------
 ROUTE_SMOOTH_WIN = 3     # moving-average window (cells) for plotted routes; 0/1 = raw
 MAKE_FIGURES     = True
+
+# ---- planner selection + lock-and-re-search (path diversification) ----
+# PLANNER: single-path solver -- "fmm" (Eikonal field, steepest-descent) or
+#          "theta" (any-angle A* / Theta* on the SAME cost field).
+PLANNER          = "fmm"
+# DIVERSIFY_K: alternatives per pair. 1 = one path (off). >1 = lock the found
+# path and re-search K-1 more times, each pushed onto a fresh corridor.
+DIVERSIFY_K      = 1
+LOCK_PENALTY     = 4.0     # soft-lock: cost added per unit usage along a locked route
+LOCK_HALFWIDTH_M = 150.0   # half-width (m) of the locked corridor stamped into usage
+LOCK_MODE        = "soft"  # "soft" (penalty) or "hard" (mask the corridor as no-fly)
+LOCK_SCOPE       = "global"  # "global" (spread ALL pairs) or "per_pair" (K per pair)

@@ -3,18 +3,28 @@
 """
 10_fmm_route_plan.py
 
-Risk/conflict-aware route planning with the FAST MARCHING METHOD (FMM).
+Risk/conflict-aware route planning over a weighted 2D cost field.
 
-A new, standalone planning stage (steps 02/06/07 stay intact for comparison).
-It builds a weighted Eikonal cost field over the 2D map and, for every
-objective pair, plans the route that MINIMISES a blend of travel time, ground
-RISK and traffic CONFLICT:
+A standalone planning stage (steps 02/06/07 stay intact for comparison). It
+builds a weighted Eikonal impedance field over the map and, for every objective
+pair, plans the route that MINIMISES a blend of travel time, ground RISK and
+traffic CONFLICT:
 
     cost = W_TIME*1 + W_RISK*risk_norm(step01) + W_CONFLICT*conflict_norm(step08)
 
-FMM propagates the accumulated cost from each destination (one solve per
-destination); each origin's route is the steepest-descent path back down that
-field.  No-fly cells (step 01) are obstacles.
+SELECTABLE SOLVER (PLANNER):
+    "fmm"   -- Fast Marching: propagate accumulated cost from the destination,
+               steepest-descent path back down the field (smooth, field-following).
+    "theta" -- Theta* (any-angle A* on the SAME cost field, line-of-sight string
+               pull) -- piecewise-linear least-cost paths, for comparison.
+
+LOCK-AND-RE-SEARCH (DIVERSIFY_K > 1): after a path is found it is "locked" (a
+usage penalty is stamped in a corridor around it), then the search is repeated so
+each alternative is pushed onto a FRESH route. LOCK_SCOPE="global" carries the
+usage across ALL pairs (spreads the whole network so high-density directions get
+parallel corridors, incl. along the border ring); "per_pair" gives each pair K
+spatially-separated alternatives. Works with either solver. No-fly cells are
+obstacles.
 
 Inputs
 ------
@@ -41,7 +51,9 @@ Run
 from __future__ import annotations
 
 import argparse
+import heapq
 import json
+import math
 from pathlib import Path
 
 import numpy as np
@@ -101,6 +113,10 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--w-risk", type=float, default=None)
     p.add_argument("--w-conflict", type=float, default=None)
     p.add_argument("--pairs", choices=["corridor", "all"], default=None)
+    p.add_argument("--planner", choices=["fmm", "theta"], default=None,
+                   help="single-path solver: FMM field or Theta* (any-angle A*).")
+    p.add_argument("--diversify-k", type=int, default=None,
+                   help="alternatives per pair via lock-and-re-search (1 = off).")
     p.add_argument("--no-figures", action="store_true")
     return p.parse_args()
 
@@ -182,6 +198,146 @@ def smooth_xy(xy: np.ndarray, win: int) -> np.ndarray:
 
 
 # ----------------------------------------------------------------------
+# Theta* (any-angle A*) planner over the SAME weighted cost field as FMM.
+# Selectable alternative to FMM: A* on the 8-connected grid (edge cost = mean
+# cell impedance x segment length), then a line-of-sight "string pull" so the
+# path is any-angle / piecewise-linear (Theta*-style), then rasterised back to a
+# dense cell list so it can be scored and stamped exactly like an FMM path.
+# ----------------------------------------------------------------------
+_SQ2 = math.sqrt(2.0)
+_NB8 = [(-1, 0, 1.0), (1, 0, 1.0), (0, -1, 1.0), (0, 1, 1.0),
+        (-1, -1, _SQ2), (-1, 1, _SQ2), (1, -1, _SQ2), (1, 1, _SQ2)]
+
+
+def _astar_grid(cost, passable, src, dst, dx):
+    ny, nx = cost.shape
+    si, sj = src
+    di, dj = dst
+    fin = cost[np.isfinite(cost)]
+    cmin = float(fin.min()) if fin.size else 0.0          # admissible heuristic scale
+    def h(i, j):
+        return math.hypot(i - di, j - dj) * dx * cmin
+    g = {src: 0.0}
+    came: dict = {}
+    pq = [(h(si, sj), 0.0, src)]
+    while pq:
+        _f, gu, u = heapq.heappop(pq)
+        if u == dst:
+            break
+        if gu > g.get(u, 1e18):
+            continue
+        ui, uj = u
+        cu = cost[ui, uj]
+        for dii, djj, step in _NB8:
+            vi, vj = ui + dii, uj + djj
+            if vi < 0 or vj < 0 or vi >= ny or vj >= nx or not passable[vi, vj]:
+                continue
+            cv = cost[vi, vj]
+            if not (np.isfinite(cu) and np.isfinite(cv)):
+                continue
+            ng = gu + 0.5 * (cu + cv) * step * dx
+            v = (vi, vj)
+            if ng < g.get(v, 1e18):
+                g[v] = ng
+                came[v] = u
+                heapq.heappush(pq, (ng + h(vi, vj), ng, v))
+    if dst != src and dst not in came:
+        return []
+    path = [dst]
+    cur = dst
+    while cur != src:
+        cur = came.get(cur)
+        if cur is None:
+            return []
+        path.append(cur)
+    path.reverse()
+    return path
+
+
+def _line_cells(a, b):
+    """Bresenham cells from a to b inclusive."""
+    (i0, j0), (i1, j1) = a, b
+    di, dj = abs(i1 - i0), abs(j1 - j0)
+    si = 1 if i1 > i0 else -1
+    sj = 1 if j1 > j0 else -1
+    i, j = i0, j0
+    err = di - dj
+    out = []
+    while True:
+        out.append((i, j))
+        if i == i1 and j == j1:
+            return out
+        e2 = 2 * err
+        if e2 > -dj:
+            err -= dj
+            i += si
+        if e2 < di:
+            err += di
+            j += sj
+
+
+def _los(passable, a, b):
+    for (i, j) in _line_cells(a, b):
+        if not passable[i, j]:
+            return False
+    return True
+
+
+def _string_pull(path, passable):
+    """Drop intermediate vertices whose skip stays in line-of-sight (Theta*)."""
+    if len(path) < 3:
+        return path
+    out = [path[0]]
+    anchor = 0
+    for i in range(1, len(path) - 1):
+        if not _los(passable, path[anchor], path[i + 1]):
+            out.append(path[i])
+            anchor = i
+    out.append(path[-1])
+    return out
+
+
+def _rasterize(vertices):
+    if not vertices:
+        return []
+    dense = [vertices[0]]
+    for a, b in zip(vertices, vertices[1:]):
+        dense.extend(_line_cells(a, b)[1:])
+    return dense
+
+
+def plan_theta(cost, passable, src, dst, dx):
+    p = _astar_grid(cost, passable, src, dst, dx)
+    if len(p) < 2:
+        return []
+    return _rasterize(_string_pull(p, passable))
+
+
+def plan_one(cost_eff, src_ij, dst_ij, planner, passable, dx):
+    """Dispatch a single origin->dest path on the current (possibly locked) cost
+    field. FMM: propagate from the destination, steepest-descent from the origin.
+    Theta*: any-angle A* on the same field. Returns a dense [(i,j), ...] path."""
+    if planner == "theta":
+        return plan_theta(cost_eff, passable, src_ij, dst_ij, dx)
+    src = np.zeros(cost_eff.shape, bool)
+    src[dst_ij] = True
+    T = eikonal_fmm(cost_eff, src, dx)
+    return backtrack(T, src_ij)
+
+
+def stamp_usage(usage, path_ij, dx, halfwidth_m):
+    """'Lock' a found path: raise a usage penalty in a corridor of half-width
+    halfwidth_m around it, so the next search is steered onto a fresh route."""
+    if not path_ij:
+        return
+    pm = np.zeros(usage.shape, bool)
+    for (i, j) in path_ij:
+        pm[i, j] = True
+    d = distance_transform_edt(~pm) * dx
+    usage[d <= halfwidth_m] += 1.0
+
+
+# ----------------------------------------------------------------------
 # plotting
 # ----------------------------------------------------------------------
 def draw_objectives(ax, obj_xy):
@@ -222,12 +378,25 @@ def main() -> None:
     pair_source = args.pairs or str(pget(params, "PAIR_SOURCE", "corridor"))
     make_fig = (not args.no_figures) and bool(pget(params, "MAKE_FIGURES", True))
 
+    # ---- planner selection + lock-and-re-search (path diversification) ----
+    planner = (args.planner or str(pget(params, "PLANNER", "fmm"))).lower()
+    diversify_k = max(1, args.diversify_k if args.diversify_k is not None
+                      else int(pget(params, "DIVERSIFY_K", 1)))
+    lock_penalty = float(pget(params, "LOCK_PENALTY", 4.0))     # soft-lock weight
+    lock_halfwidth = float(pget(params, "LOCK_HALFWIDTH_M", 150.0))
+    lock_mode = str(pget(params, "LOCK_MODE", "soft")).lower()  # soft | hard
+    lock_scope = str(pget(params, "LOCK_SCOPE", "global")).lower()  # global | per_pair
+
     corridor_dir = THIS_DIR / str(pget(params, "CORRIDOR_DIR", "output/07_corridor_network"))
     out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/10_fmm_routes"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
     print(f"10_fmm_route_plan.py  {VERSION}")
+    print(f"Planner       : {planner}"
+          + (f"  +lock-and-re-search K={diversify_k} "
+             f"({lock_mode}, hw={lock_halfwidth:.0f}m, scope={lock_scope})"
+             if diversify_k > 1 else "  (single path)"))
     print(f"Weights       : time={w_time}  risk={w_risk}  conflict={w_conf}")
     print(f"Pairs         : {pair_source}")
     print(f"Output dir    : {out_dir}")
@@ -296,44 +465,64 @@ def main() -> None:
             corridor_len[(a, b)] = float(r.length_m)
     print(f"Objectives    : {len(obj_xy)}   pairs to plan: {len(pairs)}")
 
-    # ---- FMM once per destination, backtrack every origin ----
+    # ---- plan each pair; optionally K alternatives via lock-and-re-search ----
+    # For every pair the base cost field is planned by the chosen solver; each
+    # found path is "locked" (a usage penalty stamped in a corridor around it) so
+    # the next search is pushed onto a fresh route. LOCK_SCOPE=global carries the
+    # usage across ALL pairs (spreads the whole network); per_pair resets it so
+    # each pair just gets K spatially-separated alternatives.
     win = int(pget(params, "ROUTE_SMOOTH_WIN", 3))
-    dests = sorted({b for _, b in pairs})
-    T_cache = {}
-    for b in dests:
-        src = np.zeros((ny, nx), bool)
-        src[obj_ij[b]] = True
-        T_cache[b] = eikonal_fmm(cost, src, dx)
+    usage_global = np.zeros((ny, nx), float)
 
     routes_xy = {}
     rows_pts, rows_sum = [], []
     n_ok = 0
     for (a, b) in pairs:
-        path = backtrack(T_cache[b], obj_ij[a])
-        if len(path) < 2:
-            print(f"  ! {a}->{b}: unreachable")
-            continue
-        n_ok += 1
-        ij = np.array(path)
-        xy = np.column_stack([x0 + ij[:, 1] * dx, y0 + ij[:, 0] * dx]).astype(float)
-        seg = np.hypot(*np.diff(xy, axis=0).T)
-        length_m = float(seg.sum())
-        rk = risk_field[ij[:, 0], ij[:, 1]]
-        cf = conflict[ij[:, 0], ij[:, 1]]
-        pair = f"{a}_to_{b}"
-        routes_xy[pair] = smooth_xy(xy, win)
-        for s, (px, py) in enumerate(xy):
-            rows_pts.append({"pair": pair, "seq": s, "x": round(px, 2),
-                             "y": round(py, 2), "risk": round(float(rk[s]), 4),
-                             "conflict": round(float(cf[s]), 4)})
-        rows_sum.append({
-            "pair": pair, "n_pts": len(xy), "length_m": round(length_m, 1),
-            "mean_risk": round(float(rk.mean()), 4),
-            "max_risk": round(float(rk.max()), 4),
-            "mean_conflict": round(float(cf.mean()), 4),
-            "fmm_cost": round(float(T_cache[b][obj_ij[a]]), 3),
-            "corridor_length_m": round(corridor_len.get((a, b), float("nan")), 1),
-        })
+        usage = usage_global if lock_scope == "global" else np.zeros((ny, nx), float)
+        for k in range(diversify_k):
+            if lock_penalty > 0.0 and np.any(usage > 0):
+                if lock_mode == "hard":
+                    cost_eff = cost.copy()
+                    blocked = (usage > 0)
+                    blocked[obj_ij[a]] = False       # never seal the endpoints
+                    blocked[obj_ij[b]] = False
+                    cost_eff[blocked] = np.inf
+                else:
+                    cost_eff = cost + lock_penalty * usage
+            else:
+                cost_eff = cost
+
+            path = plan_one(cost_eff, obj_ij[a], obj_ij[b], planner, passable, dx)
+            if len(path) < 2:
+                if k == 0:
+                    print(f"  ! {a}->{b}: unreachable")
+                break
+
+            ij = np.array(path)
+            xy = np.column_stack([x0 + ij[:, 1] * dx, y0 + ij[:, 0] * dx]).astype(float)
+            seg = np.hypot(*np.diff(xy, axis=0).T)
+            length_m = float(seg.sum())
+            rk = risk_field[ij[:, 0], ij[:, 1]]
+            cf = conflict[ij[:, 0], ij[:, 1]]
+            pair = f"{a}_to_{b}" if diversify_k == 1 else f"{a}_to_{b}#alt{k}"
+            routes_xy[pair] = smooth_xy(xy, win)
+            n_ok += 1
+            for s, (px, py) in enumerate(xy):
+                rows_pts.append({"pair": pair, "alt": k, "seq": s,
+                                 "x": round(px, 2), "y": round(py, 2),
+                                 "risk": round(float(rk[s]), 4),
+                                 "conflict": round(float(cf[s]), 4)})
+            rows_sum.append({
+                "pair": pair, "alt": k, "n_pts": len(xy), "length_m": round(length_m, 1),
+                "mean_risk": round(float(rk.mean()), 4),
+                "max_risk": round(float(rk.max()), 4),
+                "mean_conflict": round(float(cf.mean()), 4),
+                "corridor_length_m": round(corridor_len.get((a, b), float("nan")), 1),
+            })
+            # lock this route so the next alternative (and, if global, later pairs)
+            # steer around it
+            if diversify_k > 1 or lock_scope == "global":
+                stamp_usage(usage, [tuple(p) for p in path], dx, lock_halfwidth)
 
     pd.DataFrame(rows_pts).to_csv(out_dir / "fmm_routes.csv", index=False)
     summ = pd.DataFrame(rows_sum)
@@ -348,6 +537,10 @@ def main() -> None:
 
     metrics = {
         "version": VERSION,
+        "planner": planner,
+        "diversify_k": diversify_k,
+        "lock": {"penalty": lock_penalty, "halfwidth_m": lock_halfwidth,
+                 "mode": lock_mode, "scope": lock_scope} if diversify_k > 1 else None,
         "weights": {"time": w_time, "risk": w_risk, "conflict": w_conf},
         "grid": {"nx": nx, "ny": ny, "dx_m": dx,
                  "map_w_m": nx * dx, "map_h_m": ny * dx},
@@ -377,10 +570,12 @@ def main() -> None:
         field_figure(np.where(passable, c_hat, np.nan), extent, routes_xy, obj_xy,
                      "Conflict term (step 08 traffic) + FMM routes", "conflict (normalised)",
                      "Oranges", out_dir / "conflict_field.png")
-        b0 = dests[0]
-        Td = T_cache[b0]
+        b0 = sorted({b for _, b in pairs})[0]
+        src0 = np.zeros((ny, nx), bool)
+        src0[obj_ij[b0]] = True
+        Td = eikonal_fmm(cost, src0, dx)             # illustrative cost landscape
         field_figure(np.where(np.isfinite(Td), Td, np.nan), extent,
-                     {k: v for k, v in routes_xy.items() if k.endswith(f"_to_{b0}")},
+                     {k: v for k, v in routes_xy.items() if f"_to_{b0}" in k},
                      obj_xy, f"FMM arrival-cost field to {b0}", "accumulated cost",
                      "magma", out_dir / "arrival_field.png")
         print(f"Figures       : cost_field.png, risk_field.png, conflict_field.png, arrival_field.png")
