@@ -21,7 +21,7 @@
   button.sec{background:#33405a;} input[type=range]{width:100%;} label.sp{font-size:13px;color:var(--muted);}
 </style></head><body>
 <header><h1>Agent 326 &mdash; route replay</h1>
-  <div class="sub"><a href="index.html">&larr; all agents</a> &nbsp; <b style="color:#e11">&#9670; big red diamond</b> = this agent; small dots = other agents sharing the air; <b style="color:#8e2fb8">route forward = purple</b>, <b style="color:#12246b">backward = navy</b>; green/red = start/end; amber circle = holding/waiting; red star = conflict.</div>
+  <div class="sub"><a href="index.html">&larr; all agents</a> &nbsp; <b style="color:#e11">&#9670; big red diamond</b> = this agent; small dots = other agents sharing the air; lines = this agent's <b style="color:#4a80d6">reference links</b> to same-level neighbours (<b style="color:#e23b3b">red = too close</b>); <b style="color:#8e2fb8">route forward = purple</b>, <b style="color:#12246b">backward = navy</b>; green/red = start/end; amber circle = holding/waiting; red star = conflict.</div>
 </header>
 <div class="wrap">
   <div class="stage"><canvas id="cv" width="900" height="900"></canvas></div>
@@ -34,15 +34,17 @@
           <option value="0.25">0.25&times;</option><option value="0.5">0.5&times;</option>
           <option value="1" selected>1&times;</option><option value="2">2&times;</option>
           <option value="4">4&times;</option><option value="8">8&times;</option></select></label>
-        <label class="sp"><input type="checkbox" id="cmtoggle" checked> costmap</label></div>
+        <label class="sp"><input type="checkbox" id="cmtoggle" checked> costmap</label>
+        <label class="sp"><input type="checkbox" id="linktoggle" checked> interactions</label></div>
       <div class="stat"><span>Other agents now</span><b id="near">0</b></div>
+      <div class="stat"><span>Too-close now</span><b id="tclose" style="color:#e23b3b">0</b></div>
       <div class="controls"><input type="range" id="scrub" min="0" value="0" step="1"></div></div>
     <div class="card" id="info"></div>
   </div>
 </div>
 <script src="network.js"></script>
 <script>
-const F={"aid":326,"focal":[[98,4233.4,1245.9,1,0,4],[99,4286.3,1091.6,1,0,4],[100,4305.8,926.2,1,0,4],[101,4325.4,760.7,1,0,4],[102,4301.2,598.0,1,0,4],[103,4338.4,680.6,1,0,1],[104,4316.9,845.9,1,0,1],[105,4295.4,1011.1,1,0,1],[106,4239.2,1158.0,1,0,1],[107,4167.9,1238.7,1,1,1],[108,4167.9,1238.7,1,1,1],[109,4167.9,1238.7,1,1,1],[110,4167.9,1238.7,1,1,1],[111,4167.9,1238.7,1,1,1],[112,4167.9,1238.7,1,1,1],[113,4081.3,1376.1,1,0,1],[114,3679.7,1748.1,1,0,2],[115,3675.4,1750.3,1,1,2],[116,3543.9,1820.3,1,0,2],[117,3454.7,1867.7,1,1,2],[118,3138.2,2454.3,1,0,1],[119,3136.9,2603.3,1,1,1],[120,3136.9,2603.3,1,1,1],[121,2759.4,3131.1,1,0,2],[122,2622.4,3224.4,1,0,2],[123,2485.0,3318.0,1,0,2],[124,2348.9,3410.7,1,0,2],[125,2247.7,3479.7,1,0,2],[126,2116.8,3568.8,1,0,2],[127,2114.1,3570.7,1,1,2],[128,2070.3,3652.4,1,0,2],[129,1989.4,3794.0,1,0,2],[130,1907.4,3937.4,1,0,2],[131,1825.3,4081.1,1,0,2],[132,1743.2,4224.8,1,0,2],[133,1638.5,4331.9,1,1,2],[134,1474.1,4369.9,1,0,2],[135,1312.2,4404.6,1,0,2],[136,1150.2,4439.3,1,0,2],[137,988.3,4473.9,1,0,2],[138,826.3,4508.6,1,0,2],[139,649.7,4524.7,1,0,3],[140,546.2,4395.5,1,0,3],[141,442.8,4266.3,1,0,3],[142,339.5,4137.3,1,0,3],[158,300.0,3967.2,0,0,4],[159,367.8,3832.2,0,0,4],[160,400.0,3683.1,0,0,4],[161,420.6,3529.4,0,0,4],[162,550.0,3450.0,0,0,4],[163,629.1,3320.9,0,0,4],[164,670.5,3207.3,0,0,4],[165,716.8,3053.6,0,0,4],[166,763.1,2900.0,0,0,4],[167,1105.1,2814.3,0,0,0],[168,1248.0,2891.4,0,0,0],[169,1364.4,3007.8,0,0,0],[170,1444.5,3143.0,0,0,0],[171,1436.4,3279.7,0,0,0],[172,1592.1,3336.9,0,0,0],[173,1747.5,3393.9,0,0,0],[174,1901.6,3450.5,0,0,0],[175,2052.1,3505.8,0,0,0],[176,2164.0,3476.2,0,0,5],[177,2295.2,3386.8,0,0,5],[178,2430.1,3294.9,0,0,5],[179,2567.1,3201.5,0,0,5],[180,2704.4,3108.0,0,0,5],[181,2840.7,3015.2,0,0,5],[182,2881.3,2987.5,0,1,5],[183,2881.3,2987.5,0,1,5],[184,2881.3,2987.5,0,1,5],[185,3282.2,2547.8,0,0,5],[186,3371.3,2409.2,0,0,5],[187,3460.6,2270.5,0,0,5],[188,3549.9,2131.7,0,0,5],[189,3639.4,1992.7,0,0,5],[190,3728.9,1853.6,0,0,5],[191,3816.1,1718.0,0,1,5],[192,4174.0,1328.3,0,0,5]],"stats":{"agent":326,"kind":"round_trip","origin":"DB02","dest":"DK02","speed_kmh":30.0,"launch_s":1953.0,"complete_s":3846.0,"flight_time_s":1893.0,"route_len_m":10866.6,"flown_m":10866.6,"n_holds":18,"hold_s":280.0,"energy_wh":107.28,"battery_end_pct":66.6,"completed":true,"battery_dead":false}}, NET=window.NETWORK;
+const F={"aid":326,"focal":[[1810,4212.8,1284.6,1,0,4],[1811,4279.4,1149.1,1,0,4],[1812,4296.3,1006.3,1,0,4],[1813,4309.6,894.0,1,0,4],[1814,4314.9,849.1,1,0,4],[1815,4316.9,832.5,1,0,4],[1816,4317.7,826.1,1,0,4],[1817,4318.0,823.6,1,0,4],[1818,4318.1,822.6,1,0,4],[1819,4318.1,822.3,1,0,4],[1820,4318.1,822.1,1,0,4],[1821,4318.1,822.1,1,0,4],[1822,4318.2,822.1,1,0,4],[1823,4318.2,822.0,1,0,4],[1824,4318.2,822.0,1,0,4],[1825,4318.2,822.0,1,0,4],[1826,4318.2,822.0,1,0,4],[1827,4318.2,822.0,1,0,4],[1828,4318.2,822.0,1,0,4],[1829,4318.2,822.0,1,0,4],[1830,4318.2,822.0,1,0,4],[1831,4318.2,822.0,1,0,4],[1832,4318.2,822.0,1,0,4],[1833,4318.2,822.0,1,0,4],[1834,4318.2,822.0,1,0,4],[1835,4318.2,822.0,1,0,4],[1836,4318.2,822.0,1,0,4],[1837,4318.2,822.0,1,0,4],[1838,4318.2,822.0,1,0,4],[1839,4318.2,822.0,1,0,4],[1840,4318.2,822.0,1,0,4],[1841,4318.2,822.0,1,0,4],[1842,4318.2,822.0,1,0,4],[1843,4318.2,822.0,1,0,4],[1844,4318.2,822.0,1,0,4],[1845,4318.2,822.0,1,0,4],[1846,4318.2,822.0,1,0,4],[1847,4318.2,822.0,1,0,4],[1848,4318.2,822.0,1,0,4],[1849,4318.2,822.0,1,0,4],[1850,4318.2,822.0,1,0,4],[1851,4318.2,822.0,1,0,4],[1852,4318.2,822.0,1,0,4],[1853,4318.2,822.0,1,0,4],[1854,4318.2,822.0,1,0,4],[1855,4318.2,822.0,1,0,4],[1856,4318.2,822.0,1,0,4],[1857,4318.2,822.0,1,0,4],[1858,4318.2,822.0,1,0,4],[1859,4318.2,822.0,1,0,4],[1860,4318.2,822.0,1,0,4],[1861,4318.2,822.0,1,0,4],[1862,4318.2,822.0,1,0,4],[1863,4318.2,822.0,1,0,4],[1864,4318.2,822.0,1,0,4],[1865,4318.2,822.0,1,0,4],[1866,4318.2,822.0,1,0,4],[1867,4318.2,822.0,1,0,4],[1868,4318.2,822.0,1,0,4],[1869,4318.2,822.0,1,0,4],[1870,4318.2,822.0,1,0,4],[1871,4318.2,822.0,1,0,4],[1872,4318.2,822.0,1,0,4],[1873,4318.2,822.0,1,0,4],[1874,4318.2,822.0,1,0,4],[1875,4318.2,822.0,1,0,4],[1876,4318.2,822.0,1,0,4],[1877,4318.2,822.0,1,0,4],[1878,4318.2,822.0,1,0,4],[1879,4318.2,822.0,1,0,4],[1880,4318.2,822.0,1,0,4],[1881,4318.2,822.0,1,0,4],[1882,4318.2,822.0,1,0,4],[1883,4318.2,822.0,1,0,4],[1884,4318.2,822.0,1,0,4],[1885,4318.2,822.0,1,0,4],[1886,4318.2,822.0,1,0,4],[1887,4318.2,822.0,1,0,4],[1888,4318.2,822.0,1,0,4],[1889,4318.2,822.0,1,0,4],[1890,4318.2,822.0,1,0,4],[1891,4318.2,822.0,1,0,4],[1892,4318.2,822.0,1,0,4],[1893,4318.2,822.0,1,0,4],[1894,4318.2,822.0,1,0,4],[1895,4318.2,822.0,1,0,4],[1896,4318.2,822.0,1,0,4],[1897,4318.2,822.0,1,0,4],[1898,4318.2,822.0,1,0,4],[1899,4318.2,822.0,1,0,4],[1900,4318.2,822.0,1,0,4],[1901,4318.2,822.0,1,0,4],[1902,4318.2,822.0,1,0,4],[1903,4318.2,822.0,1,0,4],[1904,4318.2,822.0,1,0,4],[1905,4318.2,822.0,1,0,4],[1906,4318.2,822.0,1,0,4],[1907,4318.2,822.0,1,0,4],[1908,4318.2,822.0,1,0,4],[1909,4318.2,822.0,1,0,4],[1910,4318.2,822.0,1,0,4],[1911,4318.2,822.0,1,0,4],[1912,4318.2,822.0,1,0,4],[1913,4318.2,822.0,1,0,4],[1914,4318.2,822.0,1,0,4],[1915,4318.2,822.0,1,0,4],[1916,4318.2,822.0,1,0,4],[1917,4318.2,822.0,1,0,4],[1918,4318.2,822.0,1,0,4],[1919,4318.2,822.0,1,0,4],[1920,4318.2,822.0,1,0,4],[1921,4318.2,822.0,1,0,4],[1922,4318.2,822.0,1,0,4],[1923,4318.2,822.0,1,0,4],[1924,4318.2,822.0,1,0,4],[1925,4318.2,822.0,1,0,4],[1926,4318.2,822.0,1,0,4],[1927,4318.2,822.0,1,0,4],[1928,4318.2,822.0,1,0,4],[1929,4318.2,822.0,1,0,4],[1930,4318.2,822.0,1,0,4],[1931,4318.2,822.0,1,0,4],[1932,4318.2,822.0,1,0,4],[1933,4318.2,822.0,1,0,4],[1934,4318.2,822.0,1,0,4],[1935,4318.2,822.0,1,0,4],[1936,4318.2,822.0,1,0,4],[1937,4318.2,822.0,1,0,4],[1938,4318.2,822.0,1,0,4],[1939,4318.2,822.0,1,0,4],[1940,4318.2,822.0,1,0,4],[1941,4318.2,822.0,1,0,4],[1942,4318.2,822.0,1,0,4],[1943,4318.2,822.0,1,0,4],[1944,4318.2,822.0,1,0,4],[1945,4318.2,822.0,1,0,4],[1946,4318.2,822.0,1,0,4],[1947,4318.2,822.0,1,0,4],[1948,4318.2,822.0,1,0,4],[1949,4318.2,822.0,1,0,4],[1950,4318.2,822.0,1,0,4],[1951,4318.2,822.0,1,0,4],[1952,4318.2,822.0,1,0,4],[1953,4318.2,822.0,1,0,4],[1954,4318.2,822.0,1,0,4],[1955,4318.2,822.0,1,0,4],[1956,4318.2,822.0,1,0,4],[1957,4318.2,822.0,1,0,4],[1958,4318.2,822.0,1,0,4],[1959,4318.2,822.0,1,0,4],[1960,4318.2,822.0,1,0,4],[1961,4318.2,822.0,1,0,4],[1962,4318.2,822.0,1,0,4],[1963,4318.2,822.0,1,0,4],[1964,4318.2,822.0,1,0,4],[1965,4318.2,822.0,1,0,4],[1966,4329.0,730.6,1,0,4],[1967,4307.4,622.2,1,0,4],[1968,4295.8,577.1,1,1,4],[1969,4295.8,577.1,1,1,4],[1970,4295.8,577.1,1,1,4],[1971,4295.8,577.1,1,1,4],[1972,4295.8,577.1,1,1,4],[1973,4295.8,577.1,1,1,4]],"stats":{"agent":326,"kind":"round_trip","origin":"DB02","dest":"DK02","speed_kmh":30.0,"launch_s":36198.0,"complete_s":39464.0,"flight_time_s":3266.0,"route_len_m":8195.5,"flown_m":753.0,"n_holds":1,"hold_s":116.0,"energy_wh":13.34,"battery_end_pct":-0.0,"completed":false,"battery_dead":true},"fcls":2}, NET=window.NETWORK;
 const FO=F.focal;                 // [[kg, x, y, cat, hold], ...]
 const FR=NET.frames||[], TIMES=NET.times||[], CONF=NET.conflicts||[];
 const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
@@ -74,14 +76,25 @@ function buildCostmap(){ const CM=NET.costmap; if(!CM) return;
   cmCanvas=off; }
 buildCostmap();
 let showCostmap=!!NET.costmap;
+let showFLinks=true;    // draw this agent's reference links to same-level neighbours
 
 function bg(){
   ctx.clearRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
   if(showCostmap&&cmCanvas) ctx.drawImage(cmCanvas,0,0);
-  ctx.strokeStyle=showCostmap?'rgba(255,255,255,.55)':'#dbe2ec'; ctx.lineWidth=1.1;
-  for(const pl of NET.lanes){ ctx.beginPath();
-    for(let i=0;i<pl.length;i++){const p=pl[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1]));}
+  // lane centrelines colour-coded by direction: A=red(forward), B=blue(backward)
+  ctx.lineWidth=1.1;
+  for(const pl of NET.lanes){ const side=pl[0], pts=pl[1];
+    ctx.strokeStyle = showCostmap
+      ? (side?'rgba(120,150,240,.7)':'rgba(220,120,120,.7)')
+      : (side?'#9fb4ee':'#eaa6a6');
+    ctx.beginPath();
+    for(let i=0;i<pts.length;i++){const p=pts[i]; i?ctx.lineTo(TX(p[0]),TY(p[1])):ctx.moveTo(TX(p[0]),TY(p[1]));}
     ctx.stroke(); }
+  // roundabout rings: outer red (forward) / inner blue (backward)
+  if(NET.rings){ ctx.lineWidth=1.6;
+    for(const r of NET.rings){ const cx=TX(r[0]),cy=TY(r[1]);
+      ctx.strokeStyle='#d62728'; ctx.beginPath(); ctx.arc(cx,cy,r[2]*sc,0,7); ctx.stroke();
+      ctx.strokeStyle='#2f5fe0'; ctx.beginPath(); ctx.arc(cx,cy,r[3]*sc,0,7); ctx.stroke(); } }
   ctx.font='bold 12px system-ui'; ctx.textBaseline='middle';
   for(const o of NET.objs){ const X=TX(o.x),Y=TY(o.y);
     if(o.kind==='DB'){ctx.fillStyle='#c0392b';ctx.fillRect(X-5,Y-5,10,10);}
@@ -121,6 +134,29 @@ function others(kg,f){ const cur=FR[kg]||[]; let nxt=null, n=0;
     } }
   for(const c of (CONF[kg]||[])) star(TX(c[0]),TY(c[1]),6);
   return n; }
+// this agent's reference links: a line from the focal agent (fx,fy at level flev)
+// to every SAME-level neighbour within the proximity radius -- red + thick when
+// closer than the required same-lane gap (the larger of the two speed-based
+// gaps), else a faint blue "keeping separation" link. Returns the too-close count.
+function focalLinks(fx,fy,flev,kg,f){
+  const M=NET.meta||{}, watch=M.link_watch_m||800, floor=M.sep_floor_m||80, gaps=M.gap_by_class||[];
+  const cur=FR[kg]||[]; let nxt=null, viol=0;
+  if(f>0 && kg+1<FR.length){ nxt=new Map(); for(const q of FR[kg+1]) nxt.set(q[4],q); }
+  for(const r of cur){
+    if(r[4]===F.aid) continue;
+    const rlev = (r.length>6)?(r[6]|0):0;
+    if(rlev!==flev) continue;                 // different level: vertically separated
+    let px=r[0],py=r[1];
+    if(nxt){ const q=nxt.get(r[4]); if(q){ px=r[0]+(q[0]-r[0])*f; py=r[1]+(q[1]-r[1])*f; } }
+    const d=Math.hypot(fx-px,fy-py);
+    if(d>watch) continue;
+    const req=Math.max(gaps[F.fcls]||floor, gaps[r[5]]||floor);
+    const fade=Math.max(0.05,1-d/watch);
+    if(d<req){ viol++; ctx.strokeStyle=`rgba(226,59,59,${Math.min(0.95,0.5+0.45*fade)})`; ctx.lineWidth=2.4; }
+    else { ctx.strokeStyle=`rgba(74,128,214,${0.22+0.45*fade})`; ctx.lineWidth=1.4; }
+    ctx.beginPath(); ctx.moveTo(TX(fx),TY(fy)); ctx.lineTo(TX(px),TY(py)); ctx.stroke();
+  }
+  return viol; }
 function draw(p){
   bg(); drawPath();
   const i=Math.min(Math.floor(p),FO.length-1), f=p-Math.floor(p);
@@ -128,6 +164,9 @@ function draw(p){
   const kg=a[0], cont=(b[0]===kg+1), nf=cont?f:0;
   const n=others(kg,nf);
   const x=a[1]+(b[1]-a[1])*f, y=a[2]+(b[2]-a[2])*f, X=TX(x), Y=TY(y);
+  const flev=a[5]|0;
+  const tc = showFLinks ? focalLinks(x,y,flev,kg,nf) : 0;
+  const tcl=document.getElementById('tclose'); if(tcl) tcl.textContent = showFLinks ? tc : '-';
   const holding=!!a[4];
   if(holding){ // HOLD/WAIT status: an amber circle COVERING the current agent
     ctx.fillStyle='#ff8c1a'; ctx.beginPath(); ctx.arc(X,Y,15,0,7); ctx.fill();
@@ -159,6 +198,9 @@ scrub.oninput=e=>{ pos=parseInt(e.target.value); playing=false; document.getElem
 const cmtoggle=document.getElementById('cmtoggle');
 if(cmtoggle){ cmtoggle.disabled=!NET.costmap; cmtoggle.checked=showCostmap;
   cmtoggle.onchange=e=>{ showCostmap=e.target.checked; redraw(); }; }
+const linktoggle=document.getElementById('linktoggle');
+if(linktoggle){ linktoggle.checked=showFLinks;
+  linktoggle.onchange=e=>{ showFLinks=e.target.checked; redraw(); }; }
 const S=F.stats;
 const row=(k,v)=>`<div class="stat"><span>${k}</span><b>${v}</b></div>`;
 document.getElementById('info').innerHTML='<h2>Mission</h2>'+

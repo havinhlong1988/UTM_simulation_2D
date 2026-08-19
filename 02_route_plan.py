@@ -35,11 +35,17 @@ parallel corridors, incl. along the border ring); "per_pair" gives each pair K
 spatially-separated alternatives. Works with either solver. No-fly cells are
 obstacles.
 
+This is the FIRST planning stage: it plans on the COST-FREE free-space volume of
+step 01 (risk + travel time only) to generate an efficient route network -- the
+seed the corridor network (07) is then built from. It needs ONLY step 01; the
+step-07 corridor network and the step-08 traffic costmap do not exist yet and are
+optional (used only if present, e.g. on a later re-plan).
+
 Inputs
 ------
-    output/01_random_node_map/*.xyz     risk_total + slowness (no-fly) grid
-    output/08_costmap/slowness_costmap.npz   traffic-density slowness (step 08)
-    output/07_corridor_network/*         objectives + pair list (+ lanes overlay)
+    output/01_random_node_map/*.xyz     risk_total + slowness grid AND the DB/DK
+                                        objective points (from the label column)
+    output/08_costmap/slowness_costmap.npz   OPTIONAL traffic-conflict term (08)
 
 Outputs (OUT_DIR)
 -----------------
@@ -77,29 +83,48 @@ VERSION = "v2"
 # ======================================================================
 PARAMETERS: dict = {
     # ---- inputs / outputs ----
-    "RISK_XYZ":      "output/01_random_node_map/random_2d_node_riskmap_seed2443556934.xyz",
-    "COST_MAP_FILE": "output/08_costmap/slowness_costmap.npz",
-    "CORRIDOR_DIR":  "output/07_corridor_network",
+    # step 01 is the ONLY required input (risk grid + DB/DK objectives from labels)
+    "RISK_XYZ":      "output/01_random_node_map/random_2d_node_riskmap_seed2102359706.xyz",
+    # No step-08 traffic costmap yet: the costmap is UNIFORM (same slowness for
+    # every node), which is routing-neutral -> this first plan is on the cost-free
+    # volume. Point COST_MAP_FILE at a real step-08 .npz + turn CONFLICT_FROM_COSTMAP
+    # on later to use the traffic map instead.
+    "COSTMAP_UNIFORM_SLOWNESS": 1.0,   # uniform slowness for all nodes (1.0 = full speed)
+    "COST_MAP_FILE": "",               # optional later step-08 costmap (unused now)
+    "CORRIDOR_DIR":  "",               # unused now (step 07 not built yet)
     "OUT_DIR":       "output/02_route_plan",
-    "PAIR_SOURCE":   "corridor",     # "corridor" (pair_routes.csv) | "all" (every objective pair)
+    "PAIR_SOURCE":   "corridor",     # "corridor" = every DB->DK pair | "all" = every objective pair
     # ---- cost-field weights ----
     "W_TIME":     1.0,               # travel time / path length
     "W_RISK":     2.0,               # obstacle + RA risk exposure (step 01)
     "W_CONFLICT": 1.5,               # traffic-density / conflict exposure (step 08)
     "COST_FLOOR": 0.05,              # min impedance on a free cell (FMM needs cost > 0)
     "RISK_BUFFER_M": 300.0,          # decay length of the hazard-proximity risk (0 = off)
+    # ---- corridor geometry: each route is a BAND, not a bare line ----
+    "ROUTE_WIDTH_M":  50.0,          # usable corridor width (centreline +- WIDTH/2 = 25 m)
+    "ROUTE_BUFFER_M": 12.5,          # safety buffer OUTSIDE the width -> half-extent 37.5 m
+    # a centreline is only allowed where WIDTH/2 + BUFFER of clearance to no-fly
+    # exists, so the whole corridor + buffer fits in free space.
     "NOFLY_AS_OBSTACLE": True,       # True: no-fly = infinite cost; False: add NOFLY_PENALTY
     "NOFLY_SLOWNESS":    10.0,       # step-01 slowness >= this marks a no-fly cell
     "NOFLY_PENALTY":     50.0,       # soft no-fly cost when NOFLY_AS_OBSTACLE is False
-    "CONFLICT_FROM_COSTMAP": True,   # use step-08 slowness as the conflict term
+    "CONFLICT_FROM_COSTMAP": False,  # OFF: plan on the cost-free volume (risk+time only).
+                                     # ON needs the step-08 costmap (a later re-plan).
     "ROUTE_SMOOTH_WIN":  3,          # moving-average window (cells) for plotted routes; 0/1 = raw
     "MAKE_FIGURES":      True,
     # ---- planner selection ----
     "PLANNER":    "fmm",             # "fmm" (Eikonal field) | "theta" (any-angle A*/Theta*)
+    # ---- network build order + crossing control ----
+    # Plan the PREDICTED-BUSIEST corridors first (find first -> lock first), so the
+    # trunk routes claim the straightest paths and later routes detour around them.
+    "PRIORITIZE_BY_DENSITY": True,
+    # penalty (added cost per existing corridor) a new route pays for CROSSING a
+    # corridor already laid down -> it takes a longer detour instead. 0 disables.
+    "CROSS_PENALTY": 12.0,
     # ---- lock-and-re-search (path diversification) ----
-    "DIVERSIFY_K":      1,           # alternatives per pair (1 = single path, off)
+    "DIVERSIFY_K":      8,           # alternatives per pair (1 = single path, off)
     "LOCK_PENALTY":     4.0,         # soft-lock: cost added per unit usage along a locked route
-    "LOCK_HALFWIDTH_M": 150.0,       # half-width (m) of the locked corridor stamped into usage
+    "LOCK_HALFWIDTH_M": 75.0,       # half-width (m) of the locked corridor stamped into usage
     "LOCK_MODE":        "soft",      # "soft" (penalty) | "hard" (mask the corridor as no-fly)
     "LOCK_SCOPE":       "global",    # "global" (spread ALL pairs) | "per_pair" (K per pair)
 }
@@ -178,6 +203,16 @@ def load_risk_grid(xyz_path: Path):
     risk[iy, ix] = df["risk_total"].to_numpy(float)
     slw01[iy, ix] = df["slowness"].to_numpy(float)
     return risk, slw01, x0, y0, dx, nx, ny
+
+
+def load_objectives(xyz_path: Path, prefixes=("DB", "DK")) -> dict:
+    """Read the routing objectives straight from the step-01 riskmap .xyz -- the
+    nodes whose `label` starts with one of `prefixes` (DB bases, DK docks). This
+    is what lets step 02 run right after step 01, before any corridor network."""
+    df = pd.read_csv(xyz_path, sep=r"\s+")
+    lab = df["label"].astype(str)
+    sel = df[lab.str.startswith(tuple(prefixes))]
+    return {str(r.label): (float(r.x), float(r.y)) for r in sel.itertuples()}
 
 
 def resample_costmap(npz_path: Path, x0, y0, dx, nx, ny):
@@ -388,11 +423,39 @@ def draw_objectives(ax, obj_xy):
                     xytext=(5, 4), fontsize=7, weight="bold", zorder=9)
 
 
-def field_figure(field, extent, routes, obj_xy, title, cbar_label, cmap, out_png):
+def _corridor_polygon(xy, half_m):
+    """Closed left+right offset polygon of a polyline at +-half_m metres."""
+    xy = np.asarray(xy, float)
+    if len(xy) < 2 or half_m <= 0:
+        return None
+    d = np.diff(xy, axis=0)
+    seglen = np.hypot(d[:, 0], d[:, 1])
+    seglen[seglen < 1e-9] = 1e-9
+    snx, sny = -d[:, 1] / seglen, d[:, 0] / seglen        # segment unit normals
+    vn = np.zeros_like(xy)                                # per-vertex normal (avg)
+    vn[:-1, 0] += snx; vn[:-1, 1] += sny
+    vn[1:, 0] += snx; vn[1:, 1] += sny
+    ln = np.hypot(vn[:, 0], vn[:, 1]); ln[ln < 1e-9] = 1e-9
+    vn[:, 0] /= ln; vn[:, 1] /= ln
+    left = xy + vn * half_m
+    right = xy - vn * half_m
+    return np.vstack([left, right[::-1]])
+
+
+def field_figure(field, extent, routes, obj_xy, title, cbar_label, cmap, out_png,
+                 corridor_half_m=0.0, buffer_half_m=0.0):
     fig, ax = plt.subplots(figsize=(12, 11))
     im = ax.imshow(field, origin="lower", extent=extent, cmap=cmap, zorder=1)
     for xy in routes.values():
-        ax.plot(xy[:, 0], xy[:, 1], "-", color="#1020ff", lw=1.1, alpha=0.85, zorder=6)
+        if buffer_half_m > 0:                            # outer buffer band (faint)
+            poly = _corridor_polygon(xy, buffer_half_m)
+            if poly is not None:
+                ax.fill(poly[:, 0], poly[:, 1], color="#1020ff", alpha=0.10, lw=0, zorder=4)
+        if corridor_half_m > 0:                          # usable corridor width
+            poly = _corridor_polygon(xy, corridor_half_m)
+            if poly is not None:
+                ax.fill(poly[:, 0], poly[:, 1], color="#1020ff", alpha=0.22, lw=0, zorder=5)
+        ax.plot(xy[:, 0], xy[:, 1], "-", color="#1020ff", lw=1.0, alpha=0.9, zorder=6)
     draw_objectives(ax, obj_xy)
     fig.colorbar(im, ax=ax, shrink=0.75).set_label(cbar_label)
     ax.set_aspect("equal")
@@ -403,6 +466,63 @@ def field_figure(field, extent, routes, obj_xy, title, cbar_label, cmap, out_png
     fig.tight_layout()
     fig.savefig(out_png, dpi=130)
     plt.close(fig)
+
+
+def order_pairs_by_density(pairs, obj_ij, ny, nx, dx, band_m):
+    """Order pairs by PREDICTED route density: build an overlap field from every
+    pair's straight-line corridor band, then rank each pair by the mean overlap
+    along its own line. Busiest (trunk) corridors come first, so they are planned
+    -- and locked -- first, and lighter routes detour around them."""
+    ii = np.arange(ny, dtype=float)[:, None]
+    jj = np.arange(nx, dtype=float)[None, :]
+    density = np.zeros((ny, nx), float)
+    bands = {}
+    for p in pairs:
+        (ai, aj), (bi, bj) = obj_ij[p[0]], obj_ij[p[1]]
+        di, dj = float(bi - ai), float(bj - aj)
+        l2 = di * di + dj * dj
+        if l2 < 1.0:
+            bands[p] = np.zeros((ny, nx), bool)
+            continue
+        t = np.clip(((ii - ai) * di + (jj - aj) * dj) / l2, 0.0, 1.0)
+        perp = np.hypot(ii - (ai + t * di), jj - (aj + t * dj)) * dx
+        m = perp <= band_m
+        bands[p] = m
+        density += m
+    scores = {p: (float(density[bands[p]].mean()) if bands[p].any() else 0.0) for p in pairs}
+    return sorted(pairs, key=lambda p: -scores[p]), scores
+
+
+def _seg_cross(p1, p2, p3, p4):
+    """True if open segments p1p2 and p3p4 properly cross."""
+    def ccw(a, b, c):
+        return (c[1] - a[1]) * (b[0] - a[0]) - (b[1] - a[1]) * (c[0] - a[0])
+    d1 = ccw(p3, p4, p1); d2 = ccw(p3, p4, p2)
+    d3 = ccw(p1, p2, p3); d4 = ccw(p1, p2, p4)
+    return (d1 * d2 < 0) and (d3 * d4 < 0)
+
+
+def count_crossings(routes: dict) -> int:
+    """Number of PRIMARY route pairs whose centrelines cross (share no endpoint)."""
+    prim = {k: v for k, v in routes.items() if k.endswith("#alt0") or "#alt" not in k}
+    items = list(prim.values())
+    ends = [(tuple(np.round(v[0], 1)), tuple(np.round(v[-1], 1))) for v in items]
+    n = 0
+    for i in range(len(items)):
+        for j in range(i + 1, len(items)):
+            if ends[i][0] in ends[j] or ends[i][1] in ends[j]:
+                continue                       # meet at a shared objective, not a crossing
+            A, B = items[i], items[j]
+            crossed = False
+            for s in range(len(A) - 1):
+                for t in range(len(B) - 1):
+                    if _seg_cross(A[s], A[s + 1], B[t], B[t + 1]):
+                        crossed = True
+                        break
+                if crossed:
+                    break
+            n += int(crossed)
+    return n
 
 
 # ----------------------------------------------------------------------
@@ -432,8 +552,9 @@ def main() -> None:
     lock_halfwidth = float(pget(params, "LOCK_HALFWIDTH_M", 150.0))
     lock_mode = str(pget(params, "LOCK_MODE", "soft")).lower()  # soft | hard
     lock_scope = str(pget(params, "LOCK_SCOPE", "global")).lower()  # global | per_pair
+    prioritize_by_density = bool(pget(params, "PRIORITIZE_BY_DENSITY", True))
+    cross_penalty = float(pget(params, "CROSS_PENALTY", 12.0))  # cost to cross a laid corridor
 
-    corridor_dir = THIS_DIR / str(pget(params, "CORRIDOR_DIR", "output/07_corridor_network"))
     out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/02_route_plan"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
@@ -458,11 +579,18 @@ def main() -> None:
     print(f"Grid          : {nx} x {ny} @ {dx:.0f} m  "
           f"({int(nofly.sum())} no-fly / {nx*ny} cells)")
 
-    # ---- conflict term from step-09 costmap ----
-    slw08 = resample_costmap(
-        THIS_DIR / str(pget(params, "COST_MAP_FILE", "")), x0, y0, dx, nx, ny)
-    conflict = (1.0 - slw08) if bool(pget(params, "CONFLICT_FROM_COSTMAP", True)) \
-        else np.zeros((ny, nx))
+    # ---- conflict term = 1 - costmap slowness ----
+    # No traffic map yet: the costmap is UNIFORM (COSTMAP_UNIFORM_SLOWNESS for every
+    # node), so the conflict term is a constant -> it does not bias routing and this
+    # plan stays on the cost-free volume (risk + time). Only if CONFLICT_FROM_COSTMAP
+    # is on AND a real step-08 .npz exists do we read a spatially-varying map.
+    cmf = str(pget(params, "COST_MAP_FILE", ""))
+    if bool(pget(params, "CONFLICT_FROM_COSTMAP", False)) and cmf \
+            and (THIS_DIR / cmf).exists():
+        conflict = 1.0 - resample_costmap(THIS_DIR / cmf, x0, y0, dx, nx, ny)
+    else:
+        uniform_slw = float(pget(params, "COSTMAP_UNIFORM_SLOWNESS", 1.0))
+        conflict = np.full((ny, nx), 1.0 - uniform_slw, dtype=float)
 
     # ---- risk field: raw step-01 risk PLUS a decaying hazard buffer ----
     # risk_total is non-zero only inside no-fly/RA cells, so on the flyable
@@ -487,29 +615,62 @@ def main() -> None:
     else:
         cost[nofly] += float(pget(params, "NOFLY_PENALTY", 50.0))
 
-    # ---- objectives -> grid cells ----
-    nodes = pd.read_csv(corridor_dir / "network_nodes.csv")
-    obj = nodes[nodes["kind"] == "objective"]
-    obj_xy = {str(r.net_id): (float(r.x), float(r.y)) for r in obj.itertuples()}
+    # ---- corridor width + buffer: constrain the centreline so the whole band fits ----
+    # clearance = distance to the nearest no-fly cell (m). A centreline is only
+    # allowed where clearance >= WIDTH/2 + BUFFER, so the corridor plus its buffer
+    # never touches an obstacle/RA.
+    route_width = float(pget(params, "ROUTE_WIDTH_M", 100.0))
+    route_buffer = float(pget(params, "ROUTE_BUFFER_M", 50.0))
+    req_clear = 0.5 * route_width + route_buffer
+    # clearance = distance to the nearest no-fly cell, capped by the distance to
+    # the MAP BOUNDARY, so the corridor + buffer never leaves the map either.
+    row_d = np.minimum(np.arange(ny), ny - 1 - np.arange(ny)).astype(float)
+    col_d = np.minimum(np.arange(nx), nx - 1 - np.arange(nx)).astype(float)
+    border_clear = np.minimum(row_d[:, None], col_d[None, :]) * dx
+    clearance_m = np.minimum(distance_transform_edt(passable) * dx, border_clear)
+    route_ok = clearance_m >= req_clear
+    passable_route = passable & route_ok
+    cost[~route_ok] = np.inf                 # centreline may only run where the band fits
+    print(f"Corridor      : width {route_width:.0f} m + buffer {route_buffer:.0f} m "
+          f"-> need {req_clear:.0f} m clearance ({int(route_ok.sum())}/{passable.sum()} cells qualify)")
+
+    # ---- objectives (DB/DK) straight from the step-01 riskmap ----
+    obj_xy = load_objectives(THIS_DIR / str(pget(params, "RISK_XYZ", "")))
     obj_ij = {}
     for nid, (x, y) in obj_xy.items():
         ix = int(np.clip(round((x - x0) / dx), 0, nx - 1))
         iy = int(np.clip(round((y - y0) / dx), 0, ny - 1))
-        obj_ij[nid] = snap_to_flyable(ix, iy, passable, nx, ny)
+        # snap the endpoint to the nearest cell that can host the full-width corridor;
+        # fall back to any flyable cell if none is near (tight objective pocket).
+        obj_ij[nid] = snap_to_flyable(ix, iy, passable_route, nx, ny)
+        if not passable_route[obj_ij[nid]]:
+            obj_ij[nid] = snap_to_flyable(ix, iy, passable, nx, ny)
+    # endpoints must always be enterable/leavable even if they sit in a tight
+    # pocket that cannot host the full corridor width.
+    for ij in set(obj_ij.values()):
+        passable_route[ij] = True
+        if not np.isfinite(cost[ij]):
+            cost[ij] = w_time * 1.0 + floor
 
     # ---- pair list ----
+    # "corridor" = every DB->DK delivery pair (the network we want to build);
+    # "all" = every objective pair. No corridor lengths yet (step 07 not built).
+    corridor_len: dict = {}
     if pair_source == "all":
         ids = list(obj_xy)
         pairs = [(a, b) for i, a in enumerate(ids) for b in ids[i + 1:]]
-        corridor_len = {}
     else:
-        pr = pd.read_csv(corridor_dir / "pair_routes.csv")
-        pairs, corridor_len = [], {}
-        for r in pr.itertuples():
-            a, b = str(r.pair).split("_to_")
-            pairs.append((a, b))
-            corridor_len[(a, b)] = float(r.length_m)
-    print(f"Objectives    : {len(obj_xy)}   pairs to plan: {len(pairs)}")
+        db_ids = [k for k in obj_xy if k.startswith("DB")]
+        dk_ids = [k for k in obj_xy if k.startswith("DK")]
+        pairs = [(a, b) for a in db_ids for b in dk_ids]
+    print(f"Objectives    : {len(obj_xy)} (DB/DK)   pairs to plan: {len(pairs)}")
+
+    # priority: plan the predicted-busiest corridors FIRST (find first -> lock
+    # first), so the trunk routes claim the straightest paths.
+    if prioritize_by_density and pairs:
+        pairs, _scores = order_pairs_by_density(pairs, obj_ij, ny, nx, dx, req_clear)
+        top = " > ".join(f"{a}->{b}" for a, b in pairs[:3])
+        print(f"Priority order: {top}" + (" > ..." if len(pairs) > 3 else ""))
 
     # ---- plan each pair; optionally K alternatives via lock-and-re-search ----
     # For every pair the base cost field is planned by the chosen solver; each
@@ -519,6 +680,11 @@ def main() -> None:
     # each pair just gets K spatially-separated alternatives.
     win = int(pget(params, "ROUTE_SMOOTH_WIN", 3))
     usage_global = np.zeros((ny, nx), float)
+    # corridor_usage accumulates every laid corridor at its FULL width; crossing
+    # (or overlapping) it costs cross_penalty, so later routes take a longer detour
+    # instead of cutting across -> minimises crossings. Half-width = corridor half.
+    corridor_usage = np.zeros((ny, nx), float)
+    cross_half = 0.5 * route_width
 
     routes_xy = {}
     rows_pts, rows_sum = [], []
@@ -526,19 +692,23 @@ def main() -> None:
     for (a, b) in pairs:
         usage = usage_global if lock_scope == "global" else np.zeros((ny, nx), float)
         for k in range(diversify_k):
+            # base cost + crossing penalty for cutting across existing corridors
+            base = cost
+            if cross_penalty > 0.0 and np.any(corridor_usage > 0):
+                base = cost + cross_penalty * corridor_usage
             if lock_penalty > 0.0 and np.any(usage > 0):
                 if lock_mode == "hard":
-                    cost_eff = cost.copy()
+                    cost_eff = base.copy()
                     blocked = (usage > 0)
                     blocked[obj_ij[a]] = False       # never seal the endpoints
                     blocked[obj_ij[b]] = False
                     cost_eff[blocked] = np.inf
                 else:
-                    cost_eff = cost + lock_penalty * usage
+                    cost_eff = base + lock_penalty * usage
             else:
-                cost_eff = cost
+                cost_eff = base
 
-            path = plan_one(cost_eff, obj_ij[a], obj_ij[b], planner, passable, dx)
+            path = plan_one(cost_eff, obj_ij[a], obj_ij[b], planner, passable_route, dx)
             if len(path) < 2:
                 if k == 0:
                     print(f"  ! {a}->{b}: unreachable")
@@ -550,6 +720,7 @@ def main() -> None:
             length_m = float(seg.sum())
             rk = risk_field[ij[:, 0], ij[:, 1]]
             cf = conflict[ij[:, 0], ij[:, 1]]
+            clr = clearance_m[ij[:, 0], ij[:, 1]]
             pair = f"{a}_to_{b}" if diversify_k == 1 else f"{a}_to_{b}#alt{k}"
             routes_xy[pair] = smooth_xy(xy, win)
             n_ok += 1
@@ -560,6 +731,11 @@ def main() -> None:
                                  "conflict": round(float(cf[s]), 4)})
             rows_sum.append({
                 "pair": pair, "alt": k, "n_pts": len(xy), "length_m": round(length_m, 1),
+                "width_m": round(route_width, 1),
+                "buffer_m": round(route_buffer, 1),
+                "half_extent_m": round(req_clear, 1),         # width/2 + buffer
+                "min_clearance_m": round(float(clr.min()), 1),  # >= half_extent (band fits)
+                "corridor_area_m2": round(length_m * route_width, 0),
                 "mean_risk": round(float(rk.mean()), 4),
                 "max_risk": round(float(rk.max()), 4),
                 "mean_conflict": round(float(cf.mean()), 4),
@@ -569,11 +745,15 @@ def main() -> None:
             # steer around it
             if diversify_k > 1 or lock_scope == "global":
                 stamp_usage(usage, [tuple(p) for p in path], dx, lock_halfwidth)
+            # record the laid corridor at full width so later routes avoid crossing it
+            if cross_penalty > 0.0:
+                stamp_usage(corridor_usage, [tuple(p) for p in path], dx, cross_half)
 
     pd.DataFrame(rows_pts).to_csv(out_dir / "route_points.csv", index=False)
     summ = pd.DataFrame(rows_sum)
     summ.to_csv(out_dir / "route_summary.csv", index=False)
-    print(f"Planned       : {n_ok}/{len(pairs)} routes")
+    n_crossings = count_crossings(routes_xy)
+    print(f"Planned       : {n_ok}/{len(pairs)} routes   crossings: {n_crossings}")
     if len(summ):
         print(f"Route length  : mean {summ['length_m'].mean():.0f} m  "
               f"(corridor mean {summ['corridor_length_m'].mean():.0f} m)")
@@ -587,12 +767,17 @@ def main() -> None:
         "diversify_k": diversify_k,
         "lock": {"penalty": lock_penalty, "halfwidth_m": lock_halfwidth,
                  "mode": lock_mode, "scope": lock_scope} if diversify_k > 1 else None,
+        "corridor": {"width_m": route_width, "buffer_m": route_buffer,
+                     "half_extent_m": req_clear},
         "weights": {"time": w_time, "risk": w_risk, "conflict": w_conf},
         "grid": {"nx": nx, "ny": ny, "dx_m": dx,
                  "map_w_m": nx * dx, "map_h_m": ny * dx},
         "n_nofly_cells": int(nofly.sum()),
         "n_pairs": len(pairs),
         "n_routes": n_ok,
+        "n_crossings": n_crossings,
+        "prioritize_by_density": prioritize_by_density,
+        "cross_penalty": cross_penalty,
         "pair_source": pair_source,
         "nofly_as_obstacle": bool(pget(params, "NOFLY_AS_OBSTACLE", True)),
         "mean_route_length_m": None if not len(summ) else round(float(summ["length_m"].mean()), 1),
@@ -607,9 +792,11 @@ def main() -> None:
     if make_fig:
         cost_disp = np.where(np.isfinite(cost), cost, np.nan)
         field_figure(cost_disp, extent, routes_xy, obj_xy,
-                     f"FMM weighted cost field  (time {w_time} / risk {w_risk} / conflict {w_conf})  + routes",
+                     f"Route network  (width {route_width:.0f} m + buffer {route_buffer:.0f} m)  "
+                     f"on the cost-free volume",
                      "impedance (normalised, no-fly = white)", "viridis",
-                     out_dir / "cost_field.png")
+                     out_dir / "cost_field.png",
+                     corridor_half_m=0.5 * route_width, buffer_half_m=req_clear)
         field_figure(np.where(passable, r_hat, np.nan), extent, routes_xy, obj_xy,
                      "Risk term (step 01) + FMM routes", "risk (normalised)",
                      "Reds", out_dir / "risk_field.png")

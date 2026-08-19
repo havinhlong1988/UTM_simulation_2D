@@ -1,0 +1,40 @@
+{
+  "version": "v2",
+  "planner": "fmm",
+  "diversify_k": 8,
+  "lock": {
+    "penalty": 4.0,
+    "halfwidth_m": 75.0,
+    "mode": "soft",
+    "scope": "global"
+  },
+  "corridor": {
+    "width_m": 50.0,
+    "buffer_m": 12.5,
+    "half_extent_m": 37.5
+  },
+  "weights": {
+    "time": 1.0,
+    "risk": 2.0,
+    "conflict": 1.5
+  },
+  "grid": {
+    "nx": 101,
+    "ny": 101,
+    "dx_m": 50.0,
+    "map_w_m": 5050.0,
+    "map_h_m": 5050.0
+  },
+  "n_nofly_cells": 1550,
+  "n_pairs": 12,
+  "n_routes": 96,
+  "n_crossings": 4,
+  "prioritize_by_density": true,
+  "cross_penalty": 12.0,
+  "pair_source": "corridor",
+  "nofly_as_obstacle": true,
+  "mean_route_length_m": 4148.3,
+  "mean_corridor_length_m": NaN,
+  "mean_risk_exposure": 0.3885,
+  "mean_conflict_exposure": 0.0
+}

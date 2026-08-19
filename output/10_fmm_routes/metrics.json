@@ -1,5 +1,13 @@
 {
   "version": "v1",
+  "planner": "fmm",
+  "diversify_k": 3,
+  "lock": {
+    "penalty": 4.0,
+    "halfwidth_m": 150.0,
+    "mode": "soft",
+    "scope": "global"
+  },
   "weights": {
     "time": 1.0,
     "risk": 2.0,
@@ -14,11 +22,11 @@
   },
   "n_nofly_cells": 2792,
   "n_pairs": 28,
-  "n_routes": 28,
+  "n_routes": 84,
   "pair_source": "corridor",
   "nofly_as_obstacle": true,
-  "mean_route_length_m": 3304.0,
-  "mean_corridor_length_m": 2945.3,
-  "mean_risk_exposure": 0.5211,
-  "mean_conflict_exposure": 0.2691
+  "mean_route_length_m": 3991.8,
+  "mean_corridor_length_m": 1827.0,
+  "mean_risk_exposure": 0.5383,
+  "mean_conflict_exposure": 0.6294
 }

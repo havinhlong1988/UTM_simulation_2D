@@ -86,6 +86,7 @@ from pathlib import Path
 import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
+from scipy.ndimage import distance_transform_edt
 
 from src.maprule import add_map_rule
 
@@ -94,25 +95,57 @@ from src.maprule import add_map_rule
 # Default model values
 # ======================================================================
 
-DEFAULT_FLYABLE_SLOWNESS = 0.085
-DEFAULT_NOFLY_SLOWNESS = 10.0
-
 DEFAULT_Z_VALUE = 0.0
-
-# Keep obstacles / RA clear of a border ring of this width (m) so a routable
-# strip is always left along all four map edges. Downstream (02/06/07) can then
-# lay corridors AROUND the boundary, giving high-density interior flows an
-# alternative outer path -- spreading traffic instead of forcing it through the
-# congested centre. 0 disables the ring (obstacles may touch the border).
-DEFAULT_BORDER_MARGIN_M = 100.0
-
-# Default random seed (used when --seed is not given). Either a fixed integer
-# (as a string, e.g. "1" -- reproducible) or a chip-clock keyword
-# (pc_time / time / clock / random / auto / now -- a fresh seed each run).
-DEFAULT_SEED = "1"
+DEFAULT_NOFLY_SLOWNESS = 10.0          # slowness >= this marks a no-fly cell
 
 LABEL_NONE = "NONE"
 PREFIX_NONE = "NONE"
+
+
+# ======================================================================
+# PARAMETERS  (run defaults -- EDIT HERE; each is overridden by its CLI flag)
+# Run directly:  python 01_generate_random_2d_node_riskmap.py
+# ======================================================================
+PARAMETERS: dict = {
+    # ---- map / grid ----
+    "WIDTH_M":  5000.0,
+    "HEIGHT_M": 5000.0,
+    "DX_M":     50.0,
+    # ---- obstacles / restricted airspace (RA) ----
+    "OBSTACLE_RATE":         0.10,     # target fraction of nodes that are obstacles
+    "OBSTACLE_MIN_RADIUS_M": 50.0,
+    "OBSTACLE_MAX_RADIUS_M": 250.0,
+    "N_RA":                  3,
+    "RA_MIN_RADIUS_M":       250.0,
+    "RA_MAX_RADIUS_M":       600.0,
+    # keep obstacles/RA clear of a routable ring this wide (m) on every edge (0 = off),
+    # so corridors can spread high-density flows around the boundary.
+    "BORDER_MARGIN_M":       100.0,
+    # ---- objectives ----
+    "N_DB":  2,                        # drone bases (mission origins)
+    "N_DK":  6,                        # docking stations
+    "N_FLZ": 4,                        # emergency landing zones
+    "OBJECTIVE_MIN_DIST_M":  400.0,    # min separation between objective centres
+    # FLZ sit BETWEEN objectives (backup landing on failure): within this distance
+    # of a DB->DK corridor, and spread at least this far apart.
+    "FLZ_CORRIDOR_MAX_DIST_M": 450.0,
+    "FLZ_MIN_PAIR_DIST_M":     800.0,
+    # among corridor candidates, prefer OPEN pockets (high obstacle clearance) and
+    # QUIET spots (few overlapping corridors = low predicted traffic). Weights (0
+    # disables a term); raise CLEARANCE to hug open space, DENSITY to avoid junctions.
+    "FLZ_CLEARANCE_WEIGHT":    1.0,
+    "FLZ_DENSITY_WEIGHT":      1.0,
+    # ---- slowness ----
+    "FLYABLE_SLOWNESS": 0.085,
+    "NOFLY_SLOWNESS":   DEFAULT_NOFLY_SLOWNESS,
+    # ---- run ----
+    # SEED: an integer (reproducible) OR a clock keyword (pc_time / time / clock /
+    # random / auto / now) -> a fresh chip-clock seed each run. The resolved number
+    # names the output files, so a clock-seeded map stays reproducible via that number.
+    "SEED":        "time",
+    "OUTPUT_DIR":  "output/01_random_node_map",
+    "OUTPUT_NAME": "random_2d_node_riskmap",
+}
 
 # Keywords for --seed that derive a fresh seed from the chip's high-resolution
 # clock instead of a fixed number.
@@ -361,6 +394,13 @@ def add_ra_objects(
         cy = float(df.at[idx, "y"])
         radius = float(rng.uniform(min_radius_m, max_radius_m))
 
+        # never let the RA disc swallow an objective: the centre is already
+        # >= min_dist from every chosen objective, so cap the radius to stay just
+        # inside the nearest one.
+        if chosen_centers:
+            nearest_obj = min(math.hypot(cx - px, cy - py) for px, py in chosen_centers)
+            radius = min(radius, nearest_obj - 1.0)
+
         d = distance_to_center(df, cx, cy)
         this_ra_mask = d <= radius
 
@@ -387,6 +427,116 @@ def add_ra_objects(
         })
 
     return ra_mask, ra_objects
+
+
+def place_flz_between_objectives(
+    df: pd.DataFrame,
+    free_mask: np.ndarray,
+    rng: np.random.Generator,
+    n_flz: int,
+    db_pts: list[tuple[float, float]],
+    dk_pts: list[tuple[float, float]],
+    chosen_centers: list[tuple[float, float]],
+    corridor_max_dist_m: float,
+    min_pair_dist_m: float,
+    endpoint_clear_m: float,
+    clearance_m: np.ndarray,
+    clear_weight: float,
+    density_weight: float,
+) -> list[dict]:
+    """Place FLZ (emergency landing zones) BETWEEN the objectives so a failing
+    drone en route can divert to a nearby safe landing spot.
+
+    HARD constraint (a candidate must satisfy all): FREE cell (free_mask = not
+    obstacle and not RA -- an FLZ is never in a no-fly region), within
+    corridor_max_dist_m of a straight DB->DK corridor, and projecting ONTO that
+    corridor away from its endpoints (endpoint_clear_m) so it is mid-route.
+
+    Among candidates, PREFER open, quiet spots: high obstacle CLEARANCE
+    (clearance_m = distance to the nearest obstacle/RA -> stay away from hazards)
+    and LOW corridor-overlap DENSITY (fewer DB->DK corridors passing nearby ->
+    avoid the predicted high-traffic junctions). Selected FLZ are spread out
+    (>= min_pair_dist_m from each other and from DB/DK/RA). Falls back to any free
+    node if too few on-corridor candidates exist.
+    """
+    xs = df["x"].to_numpy()
+    ys = df["y"].to_numpy()
+    n = len(df)
+
+    # per cell: perp distance to the nearest corridor (only where it projects
+    # BETWEEN the endpoints), and how many DB->DK corridors pass near it (a
+    # predicted-traffic proxy -- high where corridors overlap / at junctions).
+    best_perp = np.full(n, np.inf)
+    density = np.zeros(n, float)
+    for (ax, ay) in db_pts:
+        for (bx, by) in dk_pts:
+            abx, aby = bx - ax, by - ay
+            seg_l2 = abx * abx + aby * aby
+            if seg_l2 < 1.0:
+                continue
+            seglen = math.sqrt(seg_l2)
+            t = ((xs - ax) * abx + (ys - ay) * aby) / seg_l2
+            perp = np.hypot(xs - (ax + t * abx), ys - (ay + t * aby))
+            near = perp <= corridor_max_dist_m
+            density += (near & (t >= 0.0) & (t <= 1.0)).astype(float)
+            tmin = min(0.45, endpoint_clear_m / seglen)   # stay off the endpoints
+            between = near & (t >= tmin) & (t <= 1.0 - tmin)
+            upd = between & (perp < best_perp)
+            best_perp[upd] = perp[upd]
+
+    cand = np.flatnonzero(np.isfinite(best_perp) & free_mask)
+    if len(cand) < n_flz:                     # not enough on-corridor spots -> widen
+        cand = np.flatnonzero(free_mask)
+
+    # rank: OPEN (high clearance) and QUIET (low density), both normalised over the
+    # candidate set; higher score = a better emergency-landing pocket.
+    def _norm(v):
+        lo, hi = float(v.min()), float(v.max())
+        return (v - lo) / (hi - lo) if hi - lo > 1e-9 else np.zeros_like(v, dtype=float)
+
+    score = clear_weight * _norm(clearance_m[cand]) - density_weight * _norm(density[cand])
+    order = cand[np.argsort(-score)]          # best first
+
+    def far_enough(x, y, pts, d):
+        return all(math.hypot(x - px, y - py) >= d for px, py in pts)
+
+    picked_xy = list(chosen_centers)          # keep clear of DB/DK/RA too
+    chosen_idx: list[int] = []
+    for idx in order:
+        x, y = float(xs[idx]), float(ys[idx])
+        if far_enough(x, y, picked_xy, min_pair_dist_m):
+            chosen_idx.append(int(idx))
+            picked_xy.append((x, y))
+        if len(chosen_idx) >= n_flz:
+            break
+    # if min_pair_dist was too strict, fill the rest with the best remaining spots
+    if len(chosen_idx) < n_flz:
+        for idx in order:
+            if int(idx) in chosen_idx:
+                continue
+            chosen_idx.append(int(idx))
+            if len(chosen_idx) >= n_flz:
+                break
+
+    objects: list[dict] = []
+    for i, idx in enumerate(chosen_idx[:n_flz], start=1):
+        label = f"FLZ{i:02d}"
+        df.at[idx, "label"] = label
+        df.at[idx, "label_prefix"] = "FLZ"
+        df.at[idx, "objective_flag"] = 1
+        x = float(df.at[idx, "x"])
+        y = float(df.at[idx, "y"])
+        chosen_centers.append((x, y))
+        objects.append({
+            "type": "FLZ", "label": label,
+            "node_id": int(df.at[idx, "node_id"]),
+            "x": x, "y": y, "z": float(df.at[idx, "z"]),
+            "corridor_dist_m": (round(float(best_perp[idx]), 1)
+                                if np.isfinite(best_perp[idx]) else None),
+            "obstacle_clearance_m": round(float(clearance_m[idx]), 1),
+            "corridor_overlap": int(density[idx]),
+        })
+    return objects
 
 
 def compute_risk_and_slowness(
@@ -525,89 +675,61 @@ def plot_map(
 # ======================================================================
 
 def parse_args() -> argparse.Namespace:
+    """Every default comes from the header PARAMETERS block; any flag overrides it."""
+    P = PARAMETERS
     parser = argparse.ArgumentParser(
-        description="Generate random 2D node-based LAE-UTM riskmap."
-    )
+        description="Generate a random 2D node-based LAE-UTM riskmap. Defaults are "
+                    "the PARAMETERS block at the top of this file; each flag below "
+                    "overrides its PARAMETERS value.")
 
-    parser.add_argument("--width-m", type=float, default=5000.0)
-    parser.add_argument("--height-m", type=float, default=5000.0)
-    parser.add_argument("--dx-m", type=float, default=50.0)
+    # ---- map / grid ----
+    parser.add_argument("--width-m", type=float, default=P["WIDTH_M"])
+    parser.add_argument("--height-m", type=float, default=P["HEIGHT_M"])
+    parser.add_argument("--dx-m", type=float, default=P["DX_M"])
 
-    parser.add_argument(
-        "--obstacle-rate",
-        type=float,
-        default=0.20,
-        help="Target fraction of obstacle nodes, from 0.0 to 1.0.",
-    )
+    # ---- obstacles / RA ----
+    parser.add_argument("--obstacle-rate", type=float, default=P["OBSTACLE_RATE"],
+                        help="Target fraction of obstacle nodes, from 0.0 to 1.0.")
+    parser.add_argument("--obstacle-min-radius-m", type=float, default=P["OBSTACLE_MIN_RADIUS_M"])
+    parser.add_argument("--obstacle-max-radius-m", type=float, default=P["OBSTACLE_MAX_RADIUS_M"])
+    parser.add_argument("--n-ra", type=int, default=P["N_RA"])
+    parser.add_argument("--ra-min-radius-m", type=float, default=P["RA_MIN_RADIUS_M"])
+    parser.add_argument("--ra-max-radius-m", type=float, default=P["RA_MAX_RADIUS_M"])
+    parser.add_argument("--border-margin-m", type=float, default=P["BORDER_MARGIN_M"],
+                        help="Keep obstacles/RA clear of a ring this wide (m) along "
+                             "every edge, leaving a routable outer strip. 0 disables it.")
 
-    parser.add_argument(
-        "--border-margin-m",
-        type=float,
-        default=DEFAULT_BORDER_MARGIN_M,
-        help="Keep obstacles/RA clear of a ring this wide (m) along every map "
-             "edge, leaving a routable outer strip so corridors can spread "
-             "high-density flows around the boundary. 0 disables the ring.",
-    )
+    # ---- objectives ----
+    parser.add_argument("--n-db", type=int, default=P["N_DB"])
+    parser.add_argument("--n-dk", type=int, default=P["N_DK"])
+    parser.add_argument("--n-flz", type=int, default=P["N_FLZ"])
+    parser.add_argument("--objective-min-dist-m", type=float, default=P["OBJECTIVE_MIN_DIST_M"],
+                        help="Minimum distance between objective centers.")
+    parser.add_argument("--flz-corridor-max-dist-m", type=float,
+                        default=P["FLZ_CORRIDOR_MAX_DIST_M"],
+                        help="FLZ must lie within this distance of a DB->DK corridor "
+                             "(placed between objectives as a failure backup).")
+    parser.add_argument("--flz-min-pair-dist-m", type=float,
+                        default=P["FLZ_MIN_PAIR_DIST_M"],
+                        help="Minimum spacing between FLZ landing zones.")
+    parser.add_argument("--flz-clearance-weight", type=float,
+                        default=P["FLZ_CLEARANCE_WEIGHT"],
+                        help="Weight for FLZ obstacle clearance (higher -> more open).")
+    parser.add_argument("--flz-density-weight", type=float,
+                        default=P["FLZ_DENSITY_WEIGHT"],
+                        help="Weight for avoiding predicted-busy corridor junctions.")
 
-    parser.add_argument("--n-db", type=int, default=2)
-    parser.add_argument("--n-dk", type=int, default=6)
-    parser.add_argument("--n-flz", type=int, default=4)
-    parser.add_argument("--n-ra", type=int, default=3)
+    # ---- slowness ----
+    parser.add_argument("--flyable-slowness", type=float, default=P["FLYABLE_SLOWNESS"])
+    parser.add_argument("--nofly-slowness", type=float, default=P["NOFLY_SLOWNESS"])
 
-    parser.add_argument(
-        "--objective-min-dist-m",
-        type=float,
-        default=400.0,
-        help="Minimum distance between objective centers.",
-    )
-
-    parser.add_argument(
-        "--obstacle-min-radius-m",
-        type=float,
-        default=80.0,
-    )
-
-    parser.add_argument(
-        "--obstacle-max-radius-m",
-        type=float,
-        default=350.0,
-    )
-
-    parser.add_argument(
-        "--ra-min-radius-m",
-        type=float,
-        default=250.0,
-    )
-
-    parser.add_argument(
-        "--ra-max-radius-m",
-        type=float,
-        default=600.0,
-    )
-
-    parser.add_argument("--flyable-slowness", type=float, default=DEFAULT_FLYABLE_SLOWNESS)
-    parser.add_argument("--nofly-slowness", type=float, default=DEFAULT_NOFLY_SLOWNESS)
-
-    parser.add_argument(
-        "--seed",
-        type=str,
-        default=DEFAULT_SEED,
-        help="random seed: an integer (reproducible), or a clock keyword "
-             "(pc_time / time / clock / random / auto / now) to draw a fresh "
-             "seed from the chip's high-resolution counter each run.",
-    )
-
-    parser.add_argument(
-        "--output-dir",
-        type=str,
-        default="output/01_random_node_map",
-    )
-
-    parser.add_argument(
-        "--output-name",
-        type=str,
-        default="random_2d_node_riskmap",
-    )
+    # ---- run ----
+    parser.add_argument("--seed", type=str, default=P["SEED"],
+                        help="random seed: an integer (reproducible), or a clock keyword "
+                             "(pc_time / time / clock / random / auto / now) to draw a "
+                             "fresh seed from the chip's high-resolution counter each run.")
+    parser.add_argument("--output-dir", type=str, default=P["OUTPUT_DIR"])
+    parser.add_argument("--output-name", type=str, default=P["OUTPUT_NAME"])
 
     return parser.parse_args()
 
@@ -673,58 +795,59 @@ def main() -> None:
         border_margin_m=args.border_margin_m,
     )
 
-    # Free nodes for DB/DK/FLZ placement.
+    # Free nodes for objective placement (not on an obstacle).
     available_mask = ~obstacle_mask.copy()
 
     # ------------------------------------------------------------------
-    # 3. Add DB / DK / FLZ objectives
+    # 3. Add DB / DK objectives (mission origins / docks)
     # ------------------------------------------------------------------
     chosen_centers: list[tuple[float, float]] = []
 
     db_objects = add_point_objectives(
-        df=df,
-        available_mask=available_mask,
-        rng=rng,
-        prefix="DB",
-        count=args.n_db,
-        chosen_centers=chosen_centers,
+        df=df, available_mask=available_mask, rng=rng, prefix="DB",
+        count=args.n_db, chosen_centers=chosen_centers,
         min_dist_m=args.objective_min_dist_m,
     )
 
     dk_objects = add_point_objectives(
-        df=df,
-        available_mask=available_mask,
-        rng=rng,
-        prefix="DK",
-        count=args.n_dk,
-        chosen_centers=chosen_centers,
-        min_dist_m=args.objective_min_dist_m,
-    )
-
-    flz_objects = add_point_objectives(
-        df=df,
-        available_mask=available_mask,
-        rng=rng,
-        prefix="FLZ",
-        count=args.n_flz,
-        chosen_centers=chosen_centers,
+        df=df, available_mask=available_mask, rng=rng, prefix="DK",
+        count=args.n_dk, chosen_centers=chosen_centers,
         min_dist_m=args.objective_min_dist_m,
     )
 
     # ------------------------------------------------------------------
-    # 4. Add RA objects
+    # 4. Add RA (no-fly) -- placed BEFORE FLZ so an FLZ is never inside an RA;
+    #    RA discs are capped so they never swallow a DB/DK objective either.
     # ------------------------------------------------------------------
     ra_mask, ra_objects = add_ra_objects(
-        df=df,
-        width_m=args.width_m,
-        height_m=args.height_m,
-        rng=rng,
-        n_ra=args.n_ra,
-        min_radius_m=args.ra_min_radius_m,
-        max_radius_m=args.ra_max_radius_m,
-        chosen_centers=chosen_centers,
-        min_dist_m=args.objective_min_dist_m,
-        border_margin_m=args.border_margin_m,
+        df=df, width_m=args.width_m, height_m=args.height_m, rng=rng,
+        n_ra=args.n_ra, min_radius_m=args.ra_min_radius_m,
+        max_radius_m=args.ra_max_radius_m, chosen_centers=chosen_centers,
+        min_dist_m=args.objective_min_dist_m, border_margin_m=args.border_margin_m,
+    )
+
+    # ------------------------------------------------------------------
+    # 5. Add FLZ (emergency landing zones) BETWEEN the objectives, on FREE cells
+    #    only (not obstacle, NOT RA), so a failing drone can divert mid-route.
+    # ------------------------------------------------------------------
+    flz_free_mask = available_mask & ~ra_mask
+    db_pts = [(o["x"], o["y"]) for o in db_objects]
+    dk_pts = [(o["x"], o["y"]) for o in dk_objects]
+    # obstacle/RA clearance (m) per cell: distance to the nearest no-fly, so FLZ
+    # can prefer OPEN pockets away from hazards.
+    nx = len(np.unique(df["x"].to_numpy()))
+    ny = len(np.unique(df["y"].to_numpy()))
+    nofly2d = (obstacle_mask | ra_mask).reshape(ny, nx)
+    clearance_m = (distance_transform_edt(~nofly2d) * args.dx_m).ravel()
+    flz_objects = place_flz_between_objectives(
+        df=df, free_mask=flz_free_mask, rng=rng, n_flz=args.n_flz,
+        db_pts=db_pts, dk_pts=dk_pts, chosen_centers=chosen_centers,
+        corridor_max_dist_m=args.flz_corridor_max_dist_m,
+        min_pair_dist_m=args.flz_min_pair_dist_m,
+        endpoint_clear_m=args.objective_min_dist_m,
+        clearance_m=clearance_m,
+        clear_weight=args.flz_clearance_weight,
+        density_weight=args.flz_density_weight,
     )
 
     # ------------------------------------------------------------------
