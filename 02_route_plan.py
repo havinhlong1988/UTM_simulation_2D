@@ -434,7 +434,7 @@ def main() -> None:
     lock_scope = str(pget(params, "LOCK_SCOPE", "global")).lower()  # global | per_pair
 
     corridor_dir = THIS_DIR / str(pget(params, "CORRIDOR_DIR", "output/07_corridor_network"))
-    out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/10_fmm_routes"))
+    out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/02_route_plan"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
