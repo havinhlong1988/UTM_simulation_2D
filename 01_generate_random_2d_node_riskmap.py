@@ -68,6 +68,11 @@ python 01_generate_random_2d_node_riskmap.py \\
     --seed 12 \\
     --output-dir output/01_random_node_map_seed12
 
+--seed accepts either a fixed integer (reproducible) or a clock keyword
+(pc_time / time / clock / random / auto / now) that draws a fresh seed from the
+chip's high-resolution counter each run; the resolved number names the output
+files, so a clock-seeded map is still reproducible via --seed <that number>.
+
 """
 
 from __future__ import annotations
@@ -75,6 +80,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import time
 from pathlib import Path
 
 import numpy as np
@@ -98,10 +104,34 @@ DEFAULT_Z_VALUE = 0.0
 # lay corridors AROUND the boundary, giving high-density interior flows an
 # alternative outer path -- spreading traffic instead of forcing it through the
 # congested centre. 0 disables the ring (obstacles may touch the border).
-DEFAULT_BORDER_MARGIN_M = 400.0
+DEFAULT_BORDER_MARGIN_M = 100.0
 
 LABEL_NONE = "NONE"
 PREFIX_NONE = "NONE"
+
+# Keywords for --seed that derive a fresh seed from the chip's high-resolution
+# clock instead of a fixed number.
+SEED_CLOCK_KEYWORDS = ("pc_time", "time", "clock", "random", "auto", "now")
+
+
+def resolve_seed(spec) -> int:
+    """Resolve the --seed value to an int.
+
+    * a plain integer (e.g. 1, 12345) -> used as-is (reproducible run);
+    * a clock keyword (pc_time / time / clock / random / auto / now) -> a fresh
+      seed taken from the chip's high-resolution counter (perf_counter_ns XOR
+      time_ns), masked to 32 bits so it stays a tidy number and varies every run.
+    """
+    s = str(spec).strip().lower()
+    if s in SEED_CLOCK_KEYWORDS:
+        return (time.perf_counter_ns() ^ time.time_ns()) & 0xFFFFFFFF
+    try:
+        return int(s)
+    except ValueError:
+        raise SystemExit(
+            f"--seed must be an integer or one of {SEED_CLOCK_KEYWORDS} "
+            f"(got {spec!r})."
+        )
 
 
 # ======================================================================
@@ -553,7 +583,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--flyable-slowness", type=float, default=DEFAULT_FLYABLE_SLOWNESS)
     parser.add_argument("--nofly-slowness", type=float, default=DEFAULT_NOFLY_SLOWNESS)
 
-    parser.add_argument("--seed", type=int, default=1)
+    parser.add_argument(
+        "--seed",
+        type=str,
+        default="1",
+        help="random seed: an integer (reproducible), or a clock keyword "
+             "(pc_time / time / clock / random / auto / now) to draw a fresh "
+             "seed from the chip's high-resolution counter each run.",
+    )
 
     parser.add_argument(
         "--output-dir",
@@ -579,11 +616,17 @@ def main() -> None:
     output_dir = Path(args.output_dir)
     output_dir.mkdir(parents=True, exist_ok=True)
 
-    xyz_file = output_dir / f"{args.output_name}_seed{args.seed}.xyz"
-    json_file = output_dir / f"{args.output_name}_seed{args.seed}_metadata.json"
-    fig_file = output_dir / f"{args.output_name}_seed{args.seed}.png"
+    # resolve the seed: a fixed integer, or a fresh clock-derived value. The
+    # RESOLVED integer is what names the files and is stored, so a clock-seeded
+    # map is still fully reproducible later via --seed <that number>.
+    seed = resolve_seed(args.seed)
+    seed_from_clock = str(args.seed).strip().lower() in SEED_CLOCK_KEYWORDS
 
-    rng = np.random.default_rng(args.seed)
+    xyz_file = output_dir / f"{args.output_name}_seed{seed}.xyz"
+    json_file = output_dir / f"{args.output_name}_seed{seed}_metadata.json"
+    fig_file = output_dir / f"{args.output_name}_seed{seed}.png"
+
+    rng = np.random.default_rng(seed)
 
     print("=" * 70)
     print("GENERATING RANDOM 2D NODE RISKMAP")
@@ -593,7 +636,8 @@ def main() -> None:
     print(f"Obstacle rate     : {args.obstacle_rate:.3f}")
     print(f"Border margin     : {args.border_margin_m:.0f} m "
           f"(clear routable ring along every edge)")
-    print(f"Random seed       : {args.seed}")
+    print(f"Random seed       : {seed}"
+          + (f" (from clock '{args.seed}')" if seed_from_clock else ""))
     print(f"Output directory  : {output_dir}")
 
     # ------------------------------------------------------------------
@@ -723,7 +767,8 @@ def main() -> None:
     # ------------------------------------------------------------------
     metadata = {
         "description": "Random 2D node-based LAE-UTM riskmap",
-        "seed": args.seed,
+        "seed": seed,
+        "seed_spec": str(args.seed),
         "width_m": args.width_m,
         "height_m": args.height_m,
         "dx_m": args.dx_m,
@@ -753,7 +798,7 @@ def main() -> None:
     # 8. Save quick-look figure
     # ------------------------------------------------------------------
     title = (
-        f"Random 2D Node Riskmap | seed={args.seed} | "
+        f"Random 2D Node Riskmap | seed={seed} | "
         f"obstacle={df['obstacle_flag'].mean():.2f} | "
         f"RA={df['ra_flag'].mean():.2f}"
     )
