@@ -207,8 +207,8 @@ BUFFER_CORRIDOR_MAX_OFFSET_M = 250.0
 # ----------------------------------------------------------------------
 # Plotting
 # ----------------------------------------------------------------------
-SAVE_PAIR_FIGURES = True
-SAVE_OVERVIEW_FIGURE = True
+SAVE_PAIR_FIGURES = False
+SAVE_OVERVIEW_FIGURE = False
 PLOT_NODE_SIZE = 4.0
 PLOT_ROUTE_LINEWIDTH = 1.2
 # Draw each route's corridor -- the 2D map footprint of the circular prism
@@ -438,7 +438,7 @@ TURN_REDUCTION_MAX_ITERATIONS = 200
 # This requires pairs to be planned ONE AT A TIME so each pair can see
 # every earlier pair's result -- N_CORES is forced to 1 (sequential)
 # whenever this is on, regardless of the N_CORES setting above.
-CROSS_PAIR_OVERLAP_ENABLE = True
+CROSS_PAIR_OVERLAP_ENABLE = False
 
 # Looser than the within-pair MAX_ROUTE_NODE_OVERLAP_PERCENT (10%) above,
 # since some cross-pair sharing near the TN backbone (just outside its

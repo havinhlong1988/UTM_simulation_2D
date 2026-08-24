@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-09_simulate_agents_2d.py
+08_simulate_agents_2d.py
 
 Multi-agent 2D corridor traffic simulation on the shared UAV network
 built by 07_build_corridor_network.py.
@@ -35,13 +35,13 @@ by every output.
 
 Run
 ---
-    python 09_simulate_agents_2d.py
-    python 09_simulate_agents_2d.py --param-file params/simulate_agents_2d.params
-    python 09_simulate_agents_2d.py --agents 60 --hours 4 --seed 7 --no-animation
+    python 08_simulate_agents_2d.py
+    python 08_simulate_agents_2d.py --param-file params/simulate_agents_2d.params
+    python 08_simulate_agents_2d.py --agents 60 --hours 4 --seed 7 --no-animation
 
 Explicit CLI flags override the params file.
 
-Outputs (output/09_agent_sim_2d/)
+Outputs (output/08_agent_sim_2d/)
 ---------------------------------
     agent_missions.csv    one row per mission (endpoints, timings, holds)
     sim_timeline.csv      per-sample airborne / holding counts, min sep
@@ -735,7 +735,7 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     # slowness cost-map (from step 09): true velocity = slowness * base speed.
     # Routes are unaffected (fixed) -- the map only modulates travel speed.
     cost_map = load_costmap(pget(params, "COST_MAP_FILE",
-                                 "output/08_costmap/slowness_costmap.npz"))
+                                 "output/07_costmap/slowness_costmap.npz"))
     if cost_map is not None:
         cm_grid, cm_x0, cm_y0, cm_res, cm_nx, cm_ny = cost_map
 
@@ -1926,7 +1926,7 @@ def write_html(net: Network, frames, params, sep_eff, out_html: Path):
     # a flat row-major grid of slowness*1000 ints to keep the file compact.
     costmap = None
     cm_path = THIS_DIR / str(pget(params, "COST_MAP_FILE",
-                                  "output/08_costmap/slowness_costmap.npz"))
+                                  "output/07_costmap/slowness_costmap.npz"))
     if cm_path.exists():
         z = np.load(cm_path)
         g = z["slowness"].astype(float)
@@ -2382,7 +2382,7 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
 
     costmap = None
     cm_path = THIS_DIR / str(pget(params, "COST_MAP_FILE",
-                                  "output/08_costmap/slowness_costmap.npz"))
+                                  "output/07_costmap/slowness_costmap.npz"))
     if cm_path.exists():
         z = np.load(cm_path)
         g = z["slowness"].astype(float)
@@ -2970,14 +2970,14 @@ def main() -> None:
     if args.concurrent is not None:
         params["MAX_CONCURRENT"] = args.concurrent
 
-    corridor_dir = THIS_DIR / str(pget(params, "CORRIDOR_DIR", "output/07_corridor_network"))
-    output_dir = THIS_DIR / str(pget(params, "OUTPUT_DIR", "output/09_agent_sim_2d"))
+    corridor_dir = THIS_DIR / str(pget(params, "CORRIDOR_DIR", "output/06_corridor_network"))
+    output_dir = THIS_DIR / str(pget(params, "OUTPUT_DIR", "output/08_agent_sim_2d"))
     fig_dir = output_dir / "figures"
     output_dir.mkdir(parents=True, exist_ok=True)
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
-    print(f"09_simulate_agents_2d.py  {VERSION}")
+    print(f"08_simulate_agents_2d.py  {VERSION}")
     print(f"Param file    : {args.param_file}")
     print(f"Corridor dir  : {corridor_dir}")
     print(f"Output dir    : {output_dir}")

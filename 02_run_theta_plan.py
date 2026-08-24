@@ -3191,12 +3191,16 @@ def main() -> None:
     print(f"DB/DK avoidance : {bool(pget(params, 'USE_OTHER_DB_DK_TRAFFIC_AVOIDANCE', True))}, sigma={float(pget(params, 'OTHER_TERMINAL_AVOID_SIGMA_M', 450.0)):.1f} m, weight={float(pget(params, 'OTHER_TERMINAL_AVOID_WEIGHT', 0.80)):.2f}")
 
     n_cores_param = int(pget(params, "N_CORES", 0))
-    if n_cores_param <= 0:
-        n_cores = max(1, (os.cpu_count() or 2) - 1)
-    else:
-        n_cores = n_cores_param
+    # Cap at cpu_count-1 so one core always stays free for the OS: N_CORES <= 0
+    # means "use that cap", and a larger request is clamped down to it.
+    n_cap = max(1, (os.cpu_count() or 2) - 1)
+    n_cores = n_cap if n_cores_param <= 0 else min(n_cores_param, n_cap)
+    clamped = n_cores_param > n_cap
     n_cores = max(1, min(n_cores, len(pairs))) if pairs else 1
-    print(f"Cores           : {n_cores}" + (" (auto: max-1)" if n_cores_param <= 0 else " (from N_CORES)"))
+    note = (" (auto: max-1)" if n_cores_param <= 0
+            else (f" (N_CORES={n_cores_param} clamped to max-1={n_cap})" if clamped
+                  else " (from N_CORES)"))
+    print(f"Cores           : {n_cores}" + note)
     print("-" * 80)
 
     worker_args = [

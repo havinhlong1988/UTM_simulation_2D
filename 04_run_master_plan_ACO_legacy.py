@@ -2,7 +2,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-05_run_master_plan_v5_plot_only_snapshots.py
+04_run_master_plan_v5_plot_only_snapshots.py
 
 v5 adds:
     - RUN_MODE = all | plot_only

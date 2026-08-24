@@ -20,8 +20,8 @@
 
 # Input / output ------------------------------------------------------
 RISK_XYZ      = "output/01_random_node_map/random_2d_node_riskmap_seed2443556934.xyz"
-COST_MAP_FILE = "output/08_costmap/slowness_costmap.npz"
-CORRIDOR_DIR  = "output/07_corridor_network"
+COST_MAP_FILE = "output/07_costmap/slowness_costmap.npz"
+CORRIDOR_DIR  = "output/06_corridor_network"
 OUT_DIR       = "output/10_fmm_routes"
 
 # Objective pairs to plan. "corridor" -> the same pairs step 07 solved

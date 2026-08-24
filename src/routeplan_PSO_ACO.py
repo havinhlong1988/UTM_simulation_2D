@@ -1814,7 +1814,7 @@ def make_figures(model: ModelData, nodes: pd.DataFrame, edges: pd.DataFrame, rou
 
 def run_master_plan(params_file: str | Path | SimpleNamespace) -> None:
     params = load_params(params_file) if not isinstance(params_file, SimpleNamespace) else params_file
-    output_dir = Path(pget(params, "OUTPUT_DIR", "output/05_router_master_plan"))
+    output_dir = Path(pget(params, "OUTPUT_DIR", "output/04_router_master_plan"))
     output_dir.mkdir(parents=True, exist_ok=True)
     if Path(str(pget(params, "PARAMS_FILE", ""))).exists():
         shutil.copy2(str(pget(params, "PARAMS_FILE")), output_dir / "routeplan_PSO_ACO.params.snapshot")

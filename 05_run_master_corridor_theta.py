@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-06_run_master_corridor_theta.py
+05_run_master_corridor_theta.py
 
 LAE-UTM master CORRIDOR planner: a fork of 02_run_theta_plan.py (v15) that
 reads stage 03's clustering output (master_plan_input_nodes.csv, every raw
@@ -234,7 +234,7 @@ shortcut it proposes.
 
 Run
 ---
-    python 06_run_master_corridor_theta.py --param-file params/master_corridor_theta.params
+    python 05_run_master_corridor_theta.py --param-file params/master_corridor_theta.params
 
 Expected input model columns
 ----------------------------
@@ -270,7 +270,9 @@ import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 
+import glob
 from src.maprule import add_map_rule
+from src.route_html import render_route_html, load_candidate_nodes
 from shapely.geometry import LineString
 
 
@@ -286,7 +288,7 @@ except Exception:
     except Exception as exc:
         raise ImportError(
             "Cannot import Theta* backend. Put thetastar.py in src/thetastar.py "
-            "or in the same directory as this 06_run_master_corridor_theta.py."
+            "or in the same directory as this 05_run_master_corridor_theta.py."
         ) from exc
 
 try:
@@ -299,6 +301,125 @@ except Exception as exc:
 
 
 VERSION = "v1_corridor"
+
+# ======================================================================
+# PARAMETERS  (run defaults embedded here -- edit; a --param-file overrides)
+# ======================================================================
+PARAMETERS: dict[str, Any] = {
+    'MODEL_FILE': 'output/03_route_density/master_plan_input_nodes.csv',
+    'OUTPUT_DIR': 'output/05_master_corridor_theta',
+    'ROUTE_OBJECTIVE_PREFIXES': ['DB', 'DK'],
+    'EXCLUDE_ROUTE_OBJECTIVE_PREFIXES': ['RA', 'FLZ'],
+    'FLZ_AS_ROUTE_ENDPOINT': False,
+    'PAIR_MODE': 'unordered',
+    'SKIP_SAME_PREFIX': False,
+    'MAX_PAIR_DISTANCE_M': 0.0,
+    'ROUTE_SETS_PER_DIRECTION': 1,
+    'MAIN_ROUTE_AVOID_PREVIOUS_RADIUS_M_LIST': [250.0, 200.0, 150.0, 100.0, 50.0, 0.0],
+    'ALTERNATIVE_MAIN_SELECTION_MODE': 'longest',
+    'ALLOW_MAIN_DUPLICATE_IF_FAILED': False,
+    'USE_FLZ_SAFETY_ATTRACTION': True,
+    'FLZ_SUPPORT_SIGMA_M': 800.0,
+    'FLZ_SAFETY_WEIGHT': 0.4,
+    'MIN_FLZ_SLOWNESS_FACTOR': 0.65,
+    'SAVE_FLZ_SUPPORT_COLUMNS': True,
+    'NOFLY_SLOWNESS_THRESHOLD': 10.0,
+    'NOFLY_SLOWNESS_VALUE': 10.0,
+    'FORCE_ROUTE_OBJECTIVES_FLYABLE': False,
+    'THETASTAR_ASTAR_FIRST_LOS_SMOOTH': True,
+    'THETASTAR_ALLOW_ANY_ANGLE': True,
+    'THETASTAR_PURE_ASTAR_DELEGATE': True,
+    'THETASTAR_LINE_OF_SIGHT_METHOD': 'point_clearance',
+    'THETASTAR_BRESENHAM_CLEARANCE_CELLS': 1,
+    'THETASTAR_OUTPUT_SAMPLED_PATH': True,
+    'THETASTAR_LOS_STRAIGHT_PATH_FALLBACK': False,
+    'THETASTAR_ROUTE_WIDTH_M': 50.0,
+    'THETASTAR_LINE_OF_SIGHT_STEP_FACTOR': 0.5,
+    'THETASTAR_LOS_SMOOTH_MAX_LOOKAHEAD_NODES': 200,
+    'THETASTAR_EDGE_FALLBACK_TO_ASTAR': True,
+    'THETASTAR_HEURISTIC_WEIGHT': 1.08,
+    'THETASTAR_MAX_EXPANSIONS': 150000,
+    'THETASTAR_SHOW_PROGRESS': False,
+    'THETASTAR_PROGRESS_INTERVAL_S': 0.15,
+    'SEARCH_BBOX_BUFFER_M': 1500.0,
+    'RETRY_FULL_MAP_IF_FAILED': True,
+    'BACKUP_CORRIDOR_M_LIST': [50.0, 100.0, 150.0, 200.0, 250.0],
+    'BACKUP_BLOCK_MAIN_RADIUS_M': 30.0,
+    'ENDPOINT_BUFFER_M': 150.0,
+    'BACKWARD_AVOID_FORWARD_RADIUS_M_LIST': [200.0, 150.0, 100.0, 50.0, 0.0],
+    'ALLOW_BACKUP_DUPLICATE_IF_FAILED': True,
+    'PARALLEL_SOFT_BUFFER_ENABLE': True,
+    'BUFFER_TARGET_M': 50.0,
+    'BUFFER_SAMPLE_STEP_M': 10.0,
+    'BUFFER_PENALTY_LAMBDA_INIT': 1.0,
+    'BUFFER_PENALTY_GROWTH_RATE': 1.5,
+    'BUFFER_PENALTY_LAMBDA_CAP': 50.0,
+    'BUFFER_CROSSING_MULTIPLIER': 8.0,
+    'BUFFER_MAX_ITERATIONS': 20,
+    'BUFFER_FIELD_RADIUS_M': 75.0,
+    'BUFFER_CORRIDOR_MAX_OFFSET_M': 250.0,
+    'SAVE_PAIR_FIGURES': True,
+    'SAVE_OVERVIEW_FIGURE': True,
+    'MAKE_HTML': True,          # interactive route_network.html (frame + model/grid nodes)
+    'PLOT_NODE_SIZE': 4.0,
+    'PLOT_ROUTE_LINEWIDTH': 1.2,
+    'PLOT_SHOW_ROUTE_CORRIDOR': True,
+    'PLOT_ROUTE_CORRIDOR_ALPHA': 0.15,
+    'PLOT_ROUTE_CORRIDOR_EDGE_ALPHA': 0.5,
+    'ENABLE_ROUTE_NODE_LOCK': True,
+    'MAX_ROUTE_NODE_OVERLAP_PERCENT': 10.0,
+    'LOCK_NODE_RADIUS_M': 0.0,
+    'STRICT_LOCK_BLOCK_FIRST': True,
+    'PLOT_FONT_FAMILY': 'DejaVu Serif',
+    'PLOT_TITLE_FONT_SIZE': 16,
+    'PLOT_LABEL_FONT_SIZE': 13,
+    'PLOT_LEGEND_FONT_SIZE': 10,
+    'PLOT_TEXT_FONT_SIZE': 8,
+    'USE_OTHER_DB_DK_TRAFFIC_AVOIDANCE': True,
+    'OTHER_TERMINAL_AVOID_PREFIXES': ['DB', 'DK'],
+    'OTHER_TERMINAL_AVOID_SIGMA_M': 450.0,
+    'OTHER_TERMINAL_AVOID_WEIGHT': 0.8,
+    'MAX_OTHER_TERMINAL_SLOWNESS_FACTOR': 2.5,
+    'TABLE_MAX_K': 6,
+    'TABLE_PENALTY_WEIGHT': 1.5,
+    'TABLE_MAX_PENALTY_FACTOR': 4.0,
+    'TABLE_DUPLICATE_OVERLAP_PERCENT': 95.0,
+    'TEST_SINGLE_PAIR': '',
+    'MAX_MAIN_BACKUP_RETRY': 0,
+    # 0 = use cpu_count-1; a positive value is used as-is but CLAMPED to cpu_count-1.
+    'N_CORES': 6,
+    'FLZ_BUFFER_ENABLE': True,
+    'FLZ_BUFFER_RADIUS_M': 450.0,
+    'LIVE_PAIR_PROGRESS': True,
+    'BACKUP_SEPARATION_ENABLE': True,
+    'BACKUP_MIN_SEPARATION_M': 30.0,
+    'BACKUP_SEPARATION_LONG_ROUTE_M': 3000.0,
+    'BACKUP_SEPARATION_MAX_VIOLATION_PCT_LONG': 10.0,
+    'BACKUP_SEPARATION_MAX_VIOLATION_PCT_SHORT': 5.0,
+    'PAIR_DIRECTION_ORDER': 'interleaved',
+    'PLOT_INCLUDE_FAILED': False,
+    'TN_BUFFER_ENABLE': True,
+    'TN_BUFFER_MAJOR_RADIUS_M': 100.0,
+    'TN_BUFFER_MINOR_RADIUS_M': 50.0,
+    # ---- TN attraction (ported from 04_run_master_corridor_FMM.py so both master
+    # planners share the same 'use the traffic nodes' incentive and compare fairly).
+    # Cells FAR from the step-03 TN/RN network are made slower, and low-cost EDGES
+    # between nearby obstacle-free node pairs make that cheap region CONNECTED.
+    'TN_ATTRACT_ENABLE': True,
+    'TN_ATTRACT_RADIUS_M': 100.0,   # attraction decay length (m)
+    'TN_ATTRACT_WEIGHT': 9.0,       # slowness multiplier far from the network
+    'TN_EDGE_ENABLE': True,         # add TN-TN edges as attraction sources
+    'TN_EDGE_MAX_M': 800.0,         # only connect nodes within this distance
+    'TN_EDGE_SAMPLE_M': 25.0,       # sampling step along an edge (m)
+    'TN_EDGE_CLEAR_M': 40.0,        # an edge is rejected if it passes this close to no-fly
+    'PLOT_SHOW_TN_BUFFER': True,
+    'TURN_REDUCTION_ENABLE': True,
+    'TURN_REDUCTION_SIMPLIFY_TOLERANCE_M': 25.0,
+    'TURN_REDUCTION_MIN_ANGLE_DEG': 5.0,
+    'TURN_REDUCTION_MAX_ITERATIONS': 200,
+    'CROSS_PAIR_OVERLAP_ENABLE': True,
+    'CROSS_PAIR_MAX_ROUTE_NODE_OVERLAP_PERCENT': 20.0,
+}
 
 
 # ======================================================================
@@ -321,7 +442,9 @@ def parse_value(raw: str) -> Any:
         return raw.strip('"').strip("'")
 
 
-def load_params(param_file: str | Path) -> dict[str, Any]:
+def load_params(param_file: str | Path | None) -> dict[str, Any]:
+    if not param_file:
+        return {}
     param_file = Path(param_file)
 
     if not param_file.exists():
@@ -356,8 +479,8 @@ def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description="LAE-UTM Theta* master corridor planner")
     parser.add_argument(
         "--param-file",
-        default="params/master_corridor_theta.params",
-        help="Path to params/master_corridor_theta.params",
+        default=None,
+        help="Optional params file that OVERRIDES the embedded PARAMETERS header.",
     )
     return parser.parse_args()
 
@@ -585,6 +708,87 @@ def apply_flz_safety_attraction(
     work["slowness_raw"] = original_slowness
     work["slowness"] = modified_slowness
 
+    return work
+
+
+def apply_tn_attraction(
+    df: pd.DataFrame,
+    params: dict[str, Any],
+    nofly_threshold: float,
+) -> pd.DataFrame:
+    """Port of 04_run_master_corridor_FMM.py's TN attraction, so both master
+    planners share the same "use the traffic nodes" incentive and can be compared
+    like-for-like.
+
+    Cells FAR from the step-03 TN/RN network are made SLOWER (more expensive), so
+    Theta* is pulled to thread the node network instead of cutting straight
+    DB->DK. Like 04, the attraction sources are the nodes PLUS low-cost EDGES
+    between nearby obstacle-free node pairs, so the cheap region is a CONNECTED
+    network. Multiplicative on slowness (same shape as the FLZ attraction):
+
+        factor = 1 + TN_ATTRACT_WEIGHT * (1 - exp(-dist_to_network / RADIUS))
+
+    No-fly nodes are never touched.
+    """
+    if not bool(pget(params, "TN_ATTRACT_ENABLE", False)):
+        return df
+    major_idx, minor_idx = tn_node_indices(df)
+    idx = list(major_idx) + list(minor_idx)
+    if not idx:
+        return df
+
+    work = df.copy()
+    xm = work["xm"].to_numpy(float)
+    ym = work["ym"].to_numpy(float)
+    src = np.column_stack([xm[idx], ym[idx]])          # node centres
+
+    # low-cost EDGES: sample points alongevery  obstacle-free node pair within range
+    if bool(pget(params, "TN_EDGE_ENABLE", True)):
+        emax = float(pget(params, "TN_EDGE_MAX_M", 800.0))
+        step = max(float(pget(params, "TN_EDGE_SAMPLE_M", 25.0)), 1.0)
+        flyable_xy = np.column_stack([xm, ym])[work["slowness"].to_numpy(float) < nofly_threshold]
+        nofly_xy = np.column_stack([xm, ym])[work["slowness"].to_numpy(float) >= nofly_threshold]
+        extra = []
+        for a in range(len(src)):
+            for b in range(a + 1, len(src)):
+                d = float(np.hypot(*(src[b] - src[a])))
+                if d > emax or d < 1e-6:
+                    continue
+                n = max(2, int(d / step))
+                t = np.linspace(0.0, 1.0, n + 1)[:, None]
+                seg = src[a][None, :] * (1 - t) + src[b][None, :] * t
+                if len(nofly_xy):                        # reject edges crossing no-fly
+                    dd = np.min(np.hypot(seg[:, 0][:, None] - nofly_xy[:, 0][None, :],
+                                         seg[:, 1][:, None] - nofly_xy[:, 1][None, :]), axis=1)
+                    if float(dd.min()) < float(pget(params, "TN_EDGE_CLEAR_M", 40.0)):
+                        continue
+                extra.append(seg)
+        if extra:
+            src = np.vstack([src] + extra)
+
+    # distance from every model node to the nearest attraction source
+    d_net = np.full(len(work), np.inf)
+    B = 512
+    for s in range(0, len(src), B):
+        chunk = src[s:s + B]
+        dd = np.min(np.hypot(xm[:, None] - chunk[:, 0][None, :],
+                             ym[:, None] - chunk[:, 1][None, :]), axis=1)
+        d_net = np.minimum(d_net, dd)
+
+    radius = float(pget(params, "TN_ATTRACT_RADIUS_M", 100.0))
+    weight = float(pget(params, "TN_ATTRACT_WEIGHT", 9.0))
+    attract = np.exp(-d_net / max(radius, 1e-6))          # 1 on the network, decays out
+    factor = 1.0 + weight * (1.0 - attract)               # far from network -> slower
+
+    slowness = work["slowness"].to_numpy(float)
+    flyable = slowness < nofly_threshold
+    modified = slowness.copy()
+    modified[flyable] = slowness[flyable] * factor[flyable]
+    work["tn_distance_m"] = d_net
+    work["tn_attract_factor"] = factor
+    work["slowness"] = modified
+    print(f"TN attraction   : {len(idx)} nodes ({len(major_idx)} major / {len(minor_idx)} minor), "
+          f"{len(src)} source pts  radius {radius:.0f} m  weight {weight:.1f}")
     return work
 
 
@@ -4234,10 +4438,12 @@ def process_single_pair(
 
 def main() -> None:
     args = parse_args()
-    params = load_params(args.param_file)
+    # Start from the embedded PARAMETERS header; an optional --param-file overrides.
+    params = dict(PARAMETERS)
+    params.update(load_params(args.param_file))
 
     model_file = Path(str(pget(params, "MODEL_FILE", "")))
-    output_dir = Path(str(pget(params, "OUTPUT_DIR", "output/06_master_corridor_theta")))
+    output_dir = Path(str(pget(params, "OUTPUT_DIR", "output/05_master_corridor_theta")))
 
     route_dir = output_dir / "route_nodes"
     figure_dir = output_dir / "figures"
@@ -4249,7 +4455,7 @@ def main() -> None:
     print("=" * 80)
     print(f"THETA* MASTER OBJECTIVE-PAIR PLANNER {VERSION}")
     print("=" * 80)
-    print(f"Param file      : {args.param_file}")
+    print(f"Param file      : {args.param_file or '(embedded PARAMETERS header)'}")
     print(f"Model file      : {model_file}")
     print(f"Output directory: {output_dir}")
 
@@ -4260,6 +4466,7 @@ def main() -> None:
 
     # FLZ support modifies slowness only on flyable cells.
     df = apply_flz_safety_attraction(df, params, nofly_threshold=nofly_threshold)
+    df = apply_tn_attraction(df, params, nofly_threshold=nofly_threshold)
 
     planning_model_file = output_dir / "planning_model_with_flz_support.xyz"
     save_cols = [c for c in df.columns if not c.startswith("_")]
@@ -4349,12 +4556,16 @@ def main() -> None:
         print("Cores           : 1 (forced sequential -- CROSS_PAIR_OVERLAP_ENABLE=True)")
     else:
         n_cores_param = int(pget(params, "N_CORES", 0))
-        if n_cores_param <= 0:
-            n_cores = max(1, (os.cpu_count() or 2) - 1)
-        else:
-            n_cores = n_cores_param
+        # Cap at cpu_count-1 so one core always stays free for the OS: N_CORES <= 0
+        # means "use that cap", and a larger request is clamped down to it.
+        n_cap = max(1, (os.cpu_count() or 2) - 1)
+        n_cores = n_cap if n_cores_param <= 0 else min(n_cores_param, n_cap)
+        clamped = n_cores_param > n_cap
         n_cores = max(1, min(n_cores, len(pairs))) if pairs else 1
-        print(f"Cores           : {n_cores}" + (" (auto: max-1)" if n_cores_param <= 0 else " (from N_CORES)"))
+        note = (" (auto: max-1)" if n_cores_param <= 0
+                else (f" (N_CORES={n_cores_param} clamped to max-1={n_cap})" if clamped
+                      else " (from N_CORES)"))
+        print(f"Cores           : {n_cores}" + note)
     print("-" * 80)
 
     pair_results: list[dict[str, Any]] = []
@@ -4452,6 +4663,49 @@ def main() -> None:
     print(f"All route edges : {edge_file}")
     print(f"Route nodes     : {route_dir}")
     print(f"Figures         : {figure_dir}")
+
+    # ---- interactive HTML (shared renderer: obstacles, routes, map FRAME,
+    #      model TN/RN NODES, and the grid NODES as black dots) ----
+    if bool(pget(params, "MAKE_HTML", True)):
+        try:
+            xs = np.sort(df["x"].unique()); ys = np.sort(df["y"].unique())
+            gdx = float(np.median(np.diff(xs)))
+            gx0, gy0 = float(xs[0]), float(ys[0])
+            gnx, gny = len(xs), len(ys)
+            ixg = np.clip(np.rint((df["x"].to_numpy(float) - gx0) / gdx).astype(int), 0, gnx - 1)
+            iyg = np.clip(np.rint((df["y"].to_numpy(float) - gy0) / gdx).astype(int), 0, gny - 1)
+            slw = np.zeros((gny, gnx), float); slw[iyg, ixg] = df["slowness"].to_numpy(float)
+            nofly_g = slw >= nofly_threshold
+            extent = [gx0, gx0 + gnx * gdx, gy0, gy0 + gny * gdx]
+            lab = df["label"].astype(str)
+            obj_xy = {str(r.label): (float(r.x), float(r.y))
+                      for r in df[lab.str.startswith(("DB", "DK"))].itertuples()}
+            routes_xy, pc = {}, {}
+            for f in sorted(glob.glob(str(route_dir / "*.csv"))):
+                rd = pd.read_csv(f)
+                if "x" not in rd.columns or len(rd) < 2:
+                    continue
+                xy = (rd.sort_values("seq")[["x", "y"]].to_numpy(float)
+                      if "seq" in rd.columns else rd[["x", "y"]].to_numpy(float))
+                stem = Path(f).stem
+                pair = stem
+                if "_to_" in stem:
+                    a, rest = stem.split("_to_", 1)
+                    pair = a + "_to_" + rest.split("_")[0]
+                k = pc.get(pair, 0); pc[pair] = k + 1
+                routes_xy["%s#alt%d" % (pair, k)] = xy
+            rw = float(pget(params, "THETASTAR_ROUTE_WIDTH_M", 50.0))
+            html_path = output_dir / "route_network.html"
+            render_route_html(
+                html_path, routes_xy, obj_xy, nofly_g, extent, gdx, rw, 0.5 * rw,
+                {"title": "Theta* master corridor — step 05 (05_run_master_corridor_theta.py)",
+                 "planner": "theta", "diversify_k": pget(params, "ROUTE_SETS_PER_DIRECTION", 1),
+                 "n_routes": len(routes_xy), "n_pairs": len(pc),
+                 "w_time": 1, "w_risk": 0, "w_conflict": 0},
+                nodes=load_candidate_nodes(model_file))
+            print(f"HTML            : {html_path}")
+        except Exception as _e:
+            print(f"[warn] HTML render skipped: {_e}")
     print("=" * 80)
 
 

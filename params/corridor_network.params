@@ -12,7 +12,7 @@
 
 # Input/output
 MODEL_FILE = "output/03_clustering_hitcount/master_plan_input_nodes.csv"
-OUTPUT_DIR = "output/07_corridor_network"
+OUTPUT_DIR = "output/06_corridor_network"
 
 # ----------------------------------------------------------------------
 # Network nodes

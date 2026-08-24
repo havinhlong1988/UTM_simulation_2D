@@ -62,18 +62,13 @@ RUN_MODE = "all"   # all | plot_only
 # ----------------------------------------------------------------------
 # Input / output paths
 # ----------------------------------------------------------------------
-# INPUT_NODE_FILE is produced by 03_cluster_theta_routes.py (the DBSCAN
-# hit-count clustering stage). It contains every raw model node -- not just
-# candidates -- plus objective (DB/DK/FLZ/RA) and TN candidate flags.
-# build_master_edges() needs the full node set to build its no-fly clearance
-# KD-tree; a candidates-only file would break that check.
-# Expected file from the previous step:
-#
-#   output/03_clustering_hitcount/master_plan_input_nodes.csv
-#
-# (04_kmean_route_hit_density.py's all_model_nodes_objective_TNcandidates.csv
-# is an older, independent TN-detection path and is no longer used here.)
-INPUT_NODE_FILE = "output/03_clustering_hitcount/master_plan_input_nodes.csv"
+# INPUT_NODE_FILE is produced by 03_route_density.py. It is the FULL step-01
+# node model (every cell, with slowness so build_master_edges() can build its
+# no-fly clearance KD-tree) plus objective (DB/DK) labels and an is_candidate
+# flag set True on the density-picked traffic nodes (TN) and relief/bypass
+# nodes (RN). route_hit_count carries the corridor coverage for density weighting.
+# (The old DBSCAN 03_cluster_theta_routes / kmeans path is no longer used.)
+INPUT_NODE_FILE = "output/03_route_density/master_plan_input_nodes.csv"
 
 # OUTPUT_DIR stores all master-route planning outputs:
 #
@@ -86,7 +81,7 @@ INPUT_NODE_FILE = "output/03_clustering_hitcount/master_plan_input_nodes.csv"
 #   aco_history/*.csv
 #   figures/*.png
 #
-OUTPUT_DIR = "output/05_router_master_plan"
+OUTPUT_DIR = "output/04_router_master_plan"
 
 
 # ----------------------------------------------------------------------
@@ -584,7 +579,7 @@ FLZ_BRANCH_ACO_MAX_STEPS = 80
 # ----------------------------------------------------------------------
 # Main figures are saved under:
 #
-#   output/05_router_master_plan/figures/
+#   output/04_router_master_plan/figures/
 #
 MAKE_FIGURES = True
 FIGURE_DPI = 220
@@ -606,7 +601,7 @@ PLOT_NODE_LABELS_SINGLE_PLAN = False
 # ----------------------------------------------------------------------
 # PSO snapshots are saved to:
 #
-#   output/05_router_master_plan/figures/PSO_snap/
+#   output/04_router_master_plan/figures/PSO_snap/
 #
 # They show how best fitness changes through PSO iterations.
 #
@@ -623,7 +618,7 @@ PSO_SNAPSHOT_EVERY_N_ITER = 1
 # ----------------------------------------------------------------------
 # ACO snapshots are saved to:
 #
-#   output/05_router_master_plan/figures/ACO_snap/
+#   output/04_router_master_plan/figures/ACO_snap/
 #
 # They show the current-best ACO path at selected iterations.
 #
@@ -641,7 +636,7 @@ ACO_SNAPSHOT_EVERY_N_ITER = 5
 # ----------------------------------------------------------------------
 # Corridor figures are saved to:
 #
-#   output/05_router_master_plan/figures/corridors/
+#   output/04_router_master_plan/figures/corridors/
 #
 # v8 behavior:
 #   - CORRIDOR_PAIR_MODE = "all" makes one figure per DK-DB pair.

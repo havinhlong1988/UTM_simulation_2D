@@ -17,11 +17,11 @@
 # ----------------------------------------------------------------------
 
 # Input / output ------------------------------------------------------
-CORRIDOR_DIR = "output/07_corridor_network"
+CORRIDOR_DIR = "output/06_corridor_network"
 OUTPUT_DIR      = "output/09_phase1_A5_tolling"
 # Slowness cost-map from 08_generate_costmap.py (true velocity = slowness x
 # base speed). If the file is absent, base speeds are used.
-COST_MAP_FILE = "output/08_costmap/slowness_costmap.npz"
+COST_MAP_FILE = "output/07_costmap/slowness_costmap.npz"
 # Planning-model .xyz grid from step 02 (has obstacle_flag / ra_flag); its
 # obstacles + no-fly (RA) cells are overlaid on 00_network_traffic.png. Absent
 # -> no overlay.
@@ -201,7 +201,7 @@ SAMPLE_EVERY_S   = 20.0       # record a timeline/animation frame this often (fi
 MAX_GIF_FRAMES   = 360        # subsample frames down to at most this many
 GIF_FPS          = 20
 MAKE_HTML       = False  # self-contained interactive 2D agents_animation.html
-# Per-agent route replays under output/09_agent_sim_2d/agent_route/ (one HTML per
+# Per-agent route replays under output/08_agent_sim_2d/agent_route/ (one HTML per
 # agent + index.html) to inspect each agent's travel. MAX = -1 -> all agents.
 MAKE_AGENT_ROUTE_HTML = False
 AGENT_ROUTE_MAX           = -1

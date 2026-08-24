@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-07_build_corridor_network.py
+06_build_corridor_network.py
 
 Version: v1
 
@@ -42,11 +42,11 @@ the built legs.
 
 Run
 ---
-    python 07_build_corridor_network.py --param-file params/corridor_network.params
+    python 06_build_corridor_network.py --param-file params/corridor_network.params
 
 Main outputs
 ------------
-    output/07_corridor_network/
+    output/06_corridor_network/
         network_nodes.csv       one row per network node (objective / TN)
         network_legs.csv        one row per connection (type, length, lane report)
         lane_nodes.csv          polyline points of both lanes of every connection
@@ -1877,7 +1877,7 @@ def main() -> None:
     params = M6.load_params(args.param_file)
 
     model_file = Path(str(M6.pget(params, "MODEL_FILE", "output/03_clustering_hitcount/master_plan_input_nodes.csv")))
-    output_dir = Path(str(M6.pget(params, "OUTPUT_DIR", "output/07_corridor_network")))
+    output_dir = Path(str(M6.pget(params, "OUTPUT_DIR", "output/06_corridor_network")))
     fig_dir = output_dir / "figures"
     route_fig_dir = fig_dir / "route_with_legs"
     output_dir.mkdir(parents=True, exist_ok=True)
