@@ -1,4 +1,0 @@
-leg_id,ring,gap_before_m,gap_after_m,required_m,resolved,method
-MAJ009__RBT09,RBT10,-20.8,-20.8,50.0,False,obstacle_blocked
-DK04__BAK02,RBT05,38.8,49.9,50.0,True,shifted
-MIN013__RBT02,RBT09,48.8,49.9,50.0,True,shifted
