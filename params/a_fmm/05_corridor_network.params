@@ -11,8 +11,8 @@
 # network happens later and is out of scope.
 
 # Input/output
-MODEL_FILE = "output/03_route_density/master_plan_input_nodes.csv"
-OUTPUT_DIR = "output/06_corridor_network"
+MODEL_FILE = "output/a_fmm/03_route_density/master_plan_input_nodes.csv"
+OUTPUT_DIR = "output/a_fmm/05_corridor_network"
 
 # ----------------------------------------------------------------------
 # Network nodes

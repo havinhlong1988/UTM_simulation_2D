@@ -1,0 +1,3 @@
+# branch a_fmm -- stage 04: tái lập lưới theo TN (FMM)
+RISK_XYZ = "output/a_fmm/03_route_density/master_plan_input_nodes.csv"
+OUT_DIR  = "output/a_fmm/04_master_corridor"

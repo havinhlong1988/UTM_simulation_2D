@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-03_route_density.py
+engine_route_density.py
 
 Route-density analysis for the step-02 route network (02_route_plan.py).
 
@@ -29,8 +29,8 @@ Method (corridor-coverage density, route + buffer band + circular radius):
      obstacle clearance, spaced >= TN_MIN_SEPARATION_M apart for an even layout).
 
 Runs directly (parameters embedded in the header):
-    python 03_route_density.py
-    python 03_route_density.py --sigma-m 150 --percentile 92
+    python engine_route_density.py
+    python engine_route_density.py --sigma-m 150 --percentile 92
 
 Inputs
 ------
@@ -268,7 +268,7 @@ def main() -> None:
     incl_alt = bool(pget(params, "INCLUDE_ALTERNATIVES", True))
 
     print("=" * 66)
-    print(f"03_route_density.py  {VERSION}")
+    print(f"engine_route_density.py  {VERSION}")
     print(f"Density model  : route + buffer band + circular radius  "
           f"(extra KDE sigma {sigma_m:.0f} m)")
     print(f"Output dir     : {out_dir}")

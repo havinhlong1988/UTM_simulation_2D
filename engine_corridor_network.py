@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-06_build_corridor_network.py
+engine_corridor_network.py
 
 Version: v1
 
@@ -42,7 +42,7 @@ the built legs.
 
 Run
 ---
-    python 06_build_corridor_network.py --param-file params/corridor_network.params
+    python engine_corridor_network.py --param-file params/corridor_network.params
 
 Main outputs
 ------------
@@ -83,7 +83,7 @@ VERSION = "v1"
 def _load_master06():
     """Reuse 06's solver machinery (Theta* wrappers, soft-buffer lane
     planner, model loading) without duplicating it."""
-    spec = importlib.util.spec_from_file_location("master06", THIS_DIR / "06_run_master_corridor_theta.py")
+    spec = importlib.util.spec_from_file_location("master06", THIS_DIR / "04b_master_corridor_thetastar.py")
     module = importlib.util.module_from_spec(spec)
     sys.modules["master06"] = module
     spec.loader.exec_module(module)

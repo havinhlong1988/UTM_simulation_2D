@@ -1,0 +1,5 @@
+# branch a_fmm -- stage 03: mật độ + traffic nodes
+ROUTE_POINTS_FILE  = "output/a_fmm/02_route_plan/route_points.csv"
+ROUTE_METRICS_FILE = "output/a_fmm/02_route_plan/metrics.json"
+RISK_XYZ = "output/01_random_node_map/random_2d_node_riskmap_seed2102359706.xyz"
+OUT_DIR  = "output/a_fmm/03_route_density"

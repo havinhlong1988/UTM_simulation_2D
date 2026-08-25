@@ -1,16 +1,16 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-02_route_plan.py
+engine_route_plan.py
 
 Risk/conflict-aware route planning over a weighted 2D cost field.
 
 Runs directly with the PARAMETERS embedded in the header below -- no params file
 needed:
 
-    python 02_route_plan.py
-    python 02_route_plan.py --planner fmm --diversify-k 4
-    python 02_route_plan.py --planner theta --diversify-k 3 --pairs all
+    python engine_route_plan.py
+    python engine_route_plan.py --planner fmm --diversify-k 4
+    python engine_route_plan.py --planner theta --diversify-k 3 --pairs all
 
 Precedence: CLI flag > --param-file (optional) > the PARAMETERS block here. Edit
 the PARAMETERS dict below to change the run defaults.
@@ -620,7 +620,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
-    print(f"02_route_plan.py  {VERSION}")
+    print(f"engine_route_plan.py  {VERSION}")
     print(f"Planner       : {planner}"
           + (f"  +lock-and-re-search K={diversify_k} "
              f"({lock_mode}, hw={lock_halfwidth:.0f}m, scope={lock_scope})"
@@ -899,7 +899,7 @@ def main() -> None:
         render_route_html(
             out_dir / "route_network.html", routes_xy, obj_xy, nofly, extent, dx,
             route_width, req_clear,
-            {"title": "Route network — step 02 (02_route_plan.py)",
+            {"title": "Route network — step 02 (engine_route_plan.py)",
              "planner": planner, "diversify_k": diversify_k,
              "n_routes": n_ok, "n_pairs": len(pairs),
              "w_time": w_time, "w_risk": w_risk, "w_conflict": w_conf},

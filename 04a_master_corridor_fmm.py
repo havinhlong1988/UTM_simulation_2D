@@ -1,11 +1,11 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-04_run_master_corridor_FMM.py  --  FMM MASTER PLANNER
+04a_master_corridor_fmm.py  --  FMM MASTER PLANNER
 
 Risk-aware master-route planning over a weighted 2D cost field, using the FAST
 MARCHING METHOD (FMM). This is the FMM counterpart of the Theta* master corridor
-planner (05_run_master_corridor_theta.py): both read step-03's
+planner (04b_master_corridor_thetastar.py): both read step-03's
 master_plan_input_nodes.csv and plan DB->DK routes, so FMM vs Theta* can be
 compared fairly at the master stage. (Replaces the former PSO/ACO master planner,
 kept as 04_run_master_plan_ACO_legacy.py.)
@@ -13,9 +13,9 @@ kept as 04_run_master_plan_ACO_legacy.py.)
 Runs directly with the PARAMETERS embedded in the header below -- no params file
 needed:
 
-    python 04_run_master_corridor_FMM.py
-    python 04_run_master_corridor_FMM.py --planner fmm --diversify-k 8
-    python 04_run_master_corridor_FMM.py --planner theta --diversify-k 8 --pairs all
+    python 04a_master_corridor_fmm.py
+    python 04a_master_corridor_fmm.py --planner fmm --diversify-k 8
+    python 04a_master_corridor_fmm.py --planner theta --diversify-k 8 --pairs all
 
 Precedence: CLI flag > --param-file (optional) > the PARAMETERS block here. Edit
 the PARAMETERS dict below to change the run defaults.
@@ -95,7 +95,7 @@ PARAMETERS: dict = {
     # input as the Theta* master planner 05, for a fair FMM-vs-Theta* comparison):
     # a full grid node table with risk_total + slowness + DB/DK objective labels.
     # A step-01 riskmap .xyz also works (delimiter auto-detected).
-    "RISK_XYZ":      "output/03_route_density/master_plan_input_nodes.csv",
+    "RISK_XYZ":      "output/a_fmm/03_route_density/master_plan_input_nodes.csv",
     # No step-08 traffic costmap yet: the costmap is UNIFORM (same slowness for
     # every node), which is routing-neutral -> this first plan is on the cost-free
     # volume. Point COST_MAP_FILE at a real step-08 .npz + turn CONFLICT_FROM_COSTMAP
@@ -103,7 +103,7 @@ PARAMETERS: dict = {
     "COSTMAP_UNIFORM_SLOWNESS": 1.0,   # uniform slowness for all nodes (1.0 = full speed)
     "COST_MAP_FILE": "",               # optional later step-08 costmap (unused now)
     "CORRIDOR_DIR":  "",               # unused now (step 07 not built yet)
-    "OUT_DIR":       "output/04_master_corridor_plan_FMM",
+    "OUT_DIR":       "output/a_fmm/04_master_corridor",
     "PAIR_SOURCE":   "corridor",     # "corridor" = every DB->DK pair | "all" = every objective pair
     # ---- cost-field weights ----
     "W_TIME":     1.0,               # travel time / path length
@@ -875,7 +875,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
-    print(f"04_run_master_corridor_FMM.py (FMM master)  {VERSION}")
+    print(f"04a_master_corridor_fmm.py (FMM master)  {VERSION}")
     print(f"Planner       : {planner}"
           + (f"  +lock-and-re-search K={diversify_k} "
              f"({lock_mode}, hw={lock_halfwidth:.0f}m, scope={lock_scope})"
@@ -1306,7 +1306,7 @@ def main() -> None:
         render_route_html(
             out_dir / "route_network.html", routes_xy, obj_xy, nofly, extent, dx,
             route_width, req_clear,
-            {"title": "FMM master network — step 04 (04_run_master_corridor_FMM.py)",
+            {"title": "FMM master network — step 04 (04a_master_corridor_fmm.py)",
              "planner": planner, "diversify_k": diversify_k,
              "n_routes": n_ok, "n_pairs": len(pairs),
              "w_time": w_time, "w_risk": w_risk, "w_conflict": w_conf},

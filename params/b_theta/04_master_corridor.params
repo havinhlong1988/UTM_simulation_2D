@@ -1,0 +1,5 @@
+# branch b_theta -- stage 05: tái lập lưới theo TN (Theta*)
+MODEL_FILE = "output/b_theta/03_route_density/master_plan_input_nodes.csv"
+OUTPUT_DIR = "output/b_theta/04_master_corridor"
+CROSS_PAIR_OVERLAP_ENABLE = False
+N_CORES = 6

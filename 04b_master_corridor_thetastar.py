@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-05_run_master_corridor_theta.py
+04b_master_corridor_thetastar.py
 
 LAE-UTM master CORRIDOR planner: a fork of 02_run_theta_plan.py (v15) that
 reads stage 03's clustering output (master_plan_input_nodes.csv, every raw
@@ -234,7 +234,7 @@ shortcut it proposes.
 
 Run
 ---
-    python 05_run_master_corridor_theta.py --param-file params/master_corridor_theta.params
+    python 04b_master_corridor_thetastar.py --param-file params/master_corridor_theta.params
 
 Expected input model columns
 ----------------------------
@@ -288,7 +288,7 @@ except Exception:
     except Exception as exc:
         raise ImportError(
             "Cannot import Theta* backend. Put thetastar.py in src/thetastar.py "
-            "or in the same directory as this 05_run_master_corridor_theta.py."
+            "or in the same directory as this 04b_master_corridor_thetastar.py."
         ) from exc
 
 try:
@@ -306,8 +306,8 @@ VERSION = "v1_corridor"
 # PARAMETERS  (run defaults embedded here -- edit; a --param-file overrides)
 # ======================================================================
 PARAMETERS: dict[str, Any] = {
-    'MODEL_FILE': 'output/03_route_density/master_plan_input_nodes.csv',
-    'OUTPUT_DIR': 'output/05_master_corridor_theta',
+    'MODEL_FILE': 'output/b_theta/03_route_density/master_plan_input_nodes.csv',
+    'OUTPUT_DIR': 'output/b_theta/04_master_corridor',
     'ROUTE_OBJECTIVE_PREFIXES': ['DB', 'DK'],
     'EXCLUDE_ROUTE_OBJECTIVE_PREFIXES': ['RA', 'FLZ'],
     'FLZ_AS_ROUTE_ENDPOINT': False,
@@ -417,7 +417,7 @@ PARAMETERS: dict[str, Any] = {
     'TURN_REDUCTION_SIMPLIFY_TOLERANCE_M': 25.0,
     'TURN_REDUCTION_MIN_ANGLE_DEG': 5.0,
     'TURN_REDUCTION_MAX_ITERATIONS': 200,
-    'CROSS_PAIR_OVERLAP_ENABLE': True,
+    'CROSS_PAIR_OVERLAP_ENABLE': False,   # False -> pairs are independent, so N_CORES applies
     'CROSS_PAIR_MAX_ROUTE_NODE_OVERLAP_PERCENT': 20.0,
 }
 
@@ -4698,7 +4698,7 @@ def main() -> None:
             html_path = output_dir / "route_network.html"
             render_route_html(
                 html_path, routes_xy, obj_xy, nofly_g, extent, gdx, rw, 0.5 * rw,
-                {"title": "Theta* master corridor — step 05 (05_run_master_corridor_theta.py)",
+                {"title": "Theta* master corridor — step 05 (04b_master_corridor_thetastar.py)",
                  "planner": "theta", "diversify_k": pget(params, "ROUTE_SETS_PER_DIRECTION", 1),
                  "n_routes": len(routes_xy), "n_pairs": len(pc),
                  "w_time": 1, "w_risk": 0, "w_conflict": 0},

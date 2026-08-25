@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-07_generate_costmap.py
+engine_costmap.py
 
 Auto-generate a SLOWNESS cost-map from the traffic density produced by the
 agent simulation (09_simulate_agents_2d.py). The map is INDEPENDENT of the
@@ -32,13 +32,13 @@ cut straight across the roundabout centre.
 Pipeline
 --------
     09_simulate_agents_2d.py   (run once, base speeds)  -> traffic samples
-    07_generate_costmap.py     (this)                   -> slowness cost-map
+    engine_costmap.py     (this)                   -> slowness cost-map
     09_simulate_agents_2d.py   (re-run)                 -> speeds modulated
 
 Run
 ---
-    python 07_generate_costmap.py
-    python 07_generate_costmap.py --traffic output/08_agent_sim_2d/trajectories.csv \\
+    python engine_costmap.py
+    python engine_costmap.py --traffic output/08_agent_sim_2d/trajectories.csv \\
         --res 40 --sigma 150 --min-slowness 0.01 --corridor-half-width 60
 
 Outputs (output/07_costmap/)
@@ -198,7 +198,7 @@ def main() -> None:
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
-    print(f"07_generate_costmap.py  {VERSION}")
+    print(f"engine_costmap.py  {VERSION}")
     print(f"Traffic       : {args.traffic}")
     print(f"Output dir    : {out_dir}")
     print("=" * 66)
