@@ -70,12 +70,12 @@ VERSION = "v1"
 # ======================================================================
 PARAMETERS: dict = {
     # ---- inputs / outputs ----
-    "ROUTE_POINTS_FILE": "output/02_route_plan/route_points.csv",
+    "ROUTE_POINTS_FILE": "output/_engine_default/02_route_plan/route_points.csv",
     "RISK_XYZ":          "output/01_random_node_map/random_2d_node_riskmap_seed2102359706.xyz",
     # step-02 metrics.json -> corridor width/buffer (band half-extent). If missing,
     # ROUTE_WIDTH_M / ROUTE_BUFFER_M below are used.
-    "ROUTE_METRICS_FILE": "output/02_route_plan/metrics.json",
-    "OUT_DIR":           "output/03_route_density",
+    "ROUTE_METRICS_FILE": "output/_engine_default/02_route_plan/metrics.json",
+    "OUT_DIR":           "output/_engine_default/03_route_density",
     # ---- what counts as a route ----
     # include the diversified alternatives (True -> corridor COVERAGE density) or
     # only the primary route per pair (#alt0 -> backbone density).
@@ -259,7 +259,7 @@ def main() -> None:
         params["HIGH_DENSITY_PERCENTILE"] = args.percentile
     make_fig = (not args.no_figures) and bool(pget(params, "MAKE_FIGURES", True))
 
-    out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/03_route_density"))
+    out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/_engine_default/03_route_density"))
     (out_dir / "figures").mkdir(parents=True, exist_ok=True)
 
     sigma_m = float(pget(params, "DENSITY_SIGMA_M", 100.0))

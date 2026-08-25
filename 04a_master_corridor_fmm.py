@@ -871,7 +871,7 @@ def main() -> None:
     prioritize_by_density = bool(pget(params, "PRIORITIZE_BY_DENSITY", True))
     cross_penalty = float(pget(params, "CROSS_PENALTY", 12.0))  # cost to cross a laid corridor
 
-    out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/04_master_corridor_plan_FMM"))
+    out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/a_fmm/04_master_corridor"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)

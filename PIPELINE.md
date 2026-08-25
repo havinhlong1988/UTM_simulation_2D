@@ -38,6 +38,8 @@ params/a_fmm/        parameters for branch (a)
 params/b_theta/      parameters for branch (b)
 output/a_fmm/        results of branch (a)
 output/b_theta/      results of branch (b)
+output/legacy/       results from before the fork, kept for reference; no stage
+                     reads or writes them any more
 ```
 
 Stages 02, 03, 05, 06 and 07 run the SAME engine in both branches -- only the

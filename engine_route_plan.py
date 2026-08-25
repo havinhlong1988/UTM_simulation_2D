@@ -95,7 +95,7 @@ PARAMETERS: dict = {
     "COSTMAP_UNIFORM_SLOWNESS": 1.0,   # uniform slowness for all nodes (1.0 = full speed)
     "COST_MAP_FILE": "",               # optional later step-08 costmap (unused now)
     "CORRIDOR_DIR":  "",               # unused now (step 07 not built yet)
-    "OUT_DIR":       "output/02_route_plan",
+    "OUT_DIR":       "output/_engine_default/02_route_plan",
     "PAIR_SOURCE":   "corridor",     # "corridor" = every DB->DK pair | "all" = every objective pair
     # ---- cost-field weights ----
     "W_TIME":     1.0,               # travel time / path length
@@ -616,7 +616,7 @@ def main() -> None:
     prioritize_by_density = bool(pget(params, "PRIORITIZE_BY_DENSITY", True))
     cross_penalty = float(pget(params, "CROSS_PENALTY", 12.0))  # cost to cross a laid corridor
 
-    out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/02_route_plan"))
+    out_dir = THIS_DIR / str(pget(params, "OUT_DIR", "output/_engine_default/02_route_plan"))
     out_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)

@@ -4443,7 +4443,7 @@ def main() -> None:
     params.update(load_params(args.param_file))
 
     model_file = Path(str(pget(params, "MODEL_FILE", "")))
-    output_dir = Path(str(pget(params, "OUTPUT_DIR", "output/05_master_corridor_theta")))
+    output_dir = Path(str(pget(params, "OUTPUT_DIR", "output/b_theta/04_master_corridor")))
 
     route_dir = output_dir / "route_nodes"
     figure_dir = output_dir / "figures"

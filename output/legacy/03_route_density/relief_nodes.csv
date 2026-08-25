@@ -1,0 +1,12 @@
+fill_id,kind,region,x,y,clearance_m
+1,corner,boundary,400.0,150.0,100.0
+2,corner,boundary,4650.0,400.0,250.0
+3,corner,boundary,350.0,4650.0,111.8
+4,corner,boundary,4650.0,4650.0,657.6
+5,inner-fill,inner,1500.0,1500.0,141.4
+6,inner-fill,inner,3750.0,1500.0,559.0
+7,inner-fill,inner,3000.0,2250.0,200.0
+8,inner-fill,inner,2300.0,3050.0,100.0
+9,inner-fill,inner,3750.0,3000.0,100.0
+10,inner-fill,inner,3000.0,3750.0,200.0
+11,inner-fill,inner,3900.0,4000.0,100.0
