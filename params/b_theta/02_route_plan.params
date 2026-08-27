@@ -1,5 +1,5 @@
 # branch b_theta -- stage 02: lập số đường đi
-RISK_XYZ = "output/01_random_node_map/random_2d_node_riskmap_seed2102359706.xyz"
+RISK_XYZ = "output/01_random_node_map/random_2d_node_riskmap_seed2298177982.xyz"
 OUT_DIR  = "output/b_theta/02_route_plan"
 PLANNER  = "theta"
 DIVERSIFY_K = 8

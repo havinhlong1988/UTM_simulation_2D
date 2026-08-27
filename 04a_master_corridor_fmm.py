@@ -1310,7 +1310,8 @@ def main() -> None:
              "planner": planner, "diversify_k": diversify_k,
              "n_routes": n_ok, "n_pairs": len(pairs),
              "w_time": w_time, "w_risk": w_risk, "w_conflict": w_conf},
-            nodes=marked, fields=html_fields)
+            nodes=marked, fields=html_fields,
+            node_radius_m=0.5 * float(pget(params, "NODE_CIRCLE_DIAMETER_M", 75.0)))
         print(f"HTML          : route_network.html")
     print(f"Done. Outputs in {out_dir}")
 

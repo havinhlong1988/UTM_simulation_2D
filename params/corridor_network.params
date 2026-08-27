@@ -31,7 +31,7 @@ NETWORK_INCLUDE_MINOR_TN = True
 # longer than LEG_MAX_DETOUR_RATIO x the straight distance are dropped.
 LEG_KNN_K = 5
 LEG_MAX_LENGTH_M = 2500.0
-LEG_CLEARANCE_M = 50.0
+LEG_CLEARANCE_M = 70.0
 LEG_MAX_DETOUR_RATIO = 2.0
 
 # Corridors may only meet AT network nodes: connections that cross
@@ -46,7 +46,7 @@ LEG_SKIP_CROSSING = True
 # wherever the straight segment keeps LEG_SMOOTH_CLEARANCE_M to every
 # no-fly node, so the offset lanes come out straight too.
 LEG_SMOOTH_ENABLE = True
-LEG_SMOOTH_CLEARANCE_M = 50.0
+LEG_SMOOTH_CLEARANCE_M = 70.0
 
 # ----------------------------------------------------------------------
 # Two parallel corridors per connection (dual-parallel soft buffer, 06)
@@ -63,7 +63,7 @@ MIN_CENTERLINE_SEPARATION_M = 50.0
 # centerline that touch the outside of each circle -- no perpendicular
 # connector stubs anywhere. Keep this equal to
 # MIN_CENTERLINE_SEPARATION_M so the tangency is exact.
-NODE_CIRCLE_DIAMETER_M = 50.0
+NODE_CIRCLE_DIAMETER_M = 75.0
 # When one symmetric tangent offset side is blocked by an obstacle
 # (e.g. DK02-DK05 threads a no-fly gap off-center), the whole lane pair
 # is shifted sideways off the centerline -- separation preserved -- by
@@ -80,7 +80,7 @@ LANE_SHIFT_STEP_M = 5.0
 # node_shift_m.
 NODE_SHIFT_ENABLE = True
 NODE_SHIFT_MAX_M = 50.0
-NODE_SHIFT_MAX_PASSES = 2
+NODE_SHIFT_MAX_PASSES = 4
 
 # ----------------------------------------------------------------------
 # Backup TN suggestion (purple)
@@ -209,3 +209,27 @@ RING_SEPARATION_ENABLE       = True
 RING_CORRIDOR_SEPARATION_M   = 50.0    # min gap: near lane centerline -> ring outer lane
 RING_DETOUR_SAMPLE_M         = 15.0    # centerline re-sampling step for the bend
 RING_DETOUR_MAX_PASSES       = 3       # re-check/shift iterations (multi-ring convergence)
+
+# ----------------------------------------------------------------------
+# Lane clearance repair (final pass)
+# ----------------------------------------------------------------------
+# The leg centreline is planned with LEG_CLEARANCE_M, but the two lane
+# centrelines sit a node radius to either side of it and the shifted /
+# soft-buffer fallbacks move them further, so a lane BAND can still end up over
+# an obstacle. This pass takes the final lanes and bends any intruding stretch
+# away from the no-fly cells, then smooths the detour.
+LANE_REPAIR_ENABLE = True
+LANE_CLEARANCE_MARGIN_M = 5.0   # required = CORRIDOR_DIAMETER/2 + this
+LANE_REPAIR_MAX_PASSES  = 20
+LANE_REPAIR_SAMPLE_M    = 10.0
+# If bending a lane is not enough, MOVE the nodes that pin it (any node except a
+# DB/DK objective -- backups and extensions included) and rebuild the network.
+LANE_REPAIR_NODE_SHIFT_PASSES = 3
+LANE_REPAIR_NODE_STEP_M       = 60.0
+# a centreline bent tighter than this x the lane offset folds the inner lane
+LANE_MIN_CURVATURE_FACTOR = 1.2
+# through a bend the outbound/return pair is widened so the inner lane cannot fold
+LANE_PAIR_MAX_WIDEN   = 2.0
+LANE_PAIR_WIDEN_PASSES = 8
+# safety buffer drawn OUTSIDE the usable corridor (HTML only)
+CORRIDOR_BUFFER_M = 12.5

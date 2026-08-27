@@ -61,6 +61,7 @@ import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 from scipy.ndimage import gaussian_filter, label, center_of_mass, distance_transform_edt
+from src.route_html import render_route_html
 
 THIS_DIR = Path(__file__).resolve().parent
 VERSION = "v1"
@@ -678,6 +679,32 @@ def main() -> None:
         fig.tight_layout(); fig.savefig(out_dir / "figures" / "01_high_density_areas.png", dpi=130)
         plt.close(fig)
         print(f"Figures       : figures/00_route_density.png, figures/01_high_density_areas.png")
+
+    # ---- interactive HTML: density fields + the picked traffic/relief nodes ----
+    if bool(pget(params, "MAKE_HTML", True)):
+        html_nodes = [(t["x"], t["y"], f"TN{t['tn_id']}", "TN", True) for t in tn] \
+                   + [(r["x"], r["y"], f"RN{r['fill_id']}", "RN", True) for r in relief]
+        html_routes = {}
+        for key, g in pts.groupby("pair"):
+            xy = g.sort_values("seq")[["x", "y"]].to_numpy(float)
+            if len(xy) >= 2:
+                html_routes[str(key)] = xy
+        html_fields = [
+            ("coverage", np.where(passable, hit_cover, np.nan), "viridis"),
+            ("through", np.where(passable, hit_center, np.nan), "jet"),
+            ("high-density", np.where(mask, density, np.nan), "hot"),
+        ]
+        html_path = out_dir / "route_density.html"
+        render_route_html(
+            html_path, html_routes, obj_xy, nofly, extent, dx,
+            float(pget(params, "ROUTE_WIDTH_M", 50.0)), band_half,
+            {"title": "Route density + traffic nodes — stage 03",
+             "planner": "density", "diversify_k": "-",
+             "n_routes": n_routes, "n_pairs": pts["pair"].nunique(),
+             "w_time": 0, "w_risk": 0, "w_conflict": 0},
+            nodes=html_nodes, fields=html_fields,
+            node_radius_m=0.5 * float(pget(params, "NODE_CIRCLE_DIAMETER_M", 75.0)))
+        print(f"HTML          : {html_path.name}")
     print(f"Done. Outputs in {out_dir}")
 
 

@@ -95,7 +95,8 @@ def _route_pair_alt(key: str):
 
 
 def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
-                      route_width, req_clear, meta, nodes=None, fields=None):
+                      route_width, req_clear, meta, nodes=None, fields=None,
+                      circles=None, node_radius_m=None):
     """Write a self-contained interactive HTML map of the route network.
 
     Pan (drag) / zoom (wheel); toggle obstacles, the usable corridor band and the
@@ -180,7 +181,7 @@ def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
             objs.append('<polygon class="obj dk" points="%.1f,%.1f %.1f,%.1f %.1f,%.1f"/>'
                         % (cx, cy - 20, cx - 18, cy + 14, cx + 18, cy + 14))
         objs.append('<text class="objlbl" x="%.1f" y="%.1f">%s</text>'
-                    % (cx + 20, cy - 8, nid))
+                    % (cx + 25, cy - 12, nid))
     objs_svg = "".join(objs)
 
     # ---- model frame (map boundary) + model nodes (TN/RN candidates) ----
@@ -198,13 +199,30 @@ def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
             n_used += 1
         cx, cy = sx(x), sy(y)
         cls = ("mnode tn" if kind == "TN" else "mnode rn") + ("" if used else " unused")
-        mnodes.append('<circle class="%s" cx="%.1f" cy="%.1f" r="16"><title>%s%s</title></circle>'
-                      % (cls, cx, cy, lbl, "" if used else " (unused)"))
-        mnodes.append('<text class="mnodelbl" x="%.1f" y="%.1f">%s</text>' % (cx + 20, cy + 6, lbl))
+        _r = float(node_radius_m) if node_radius_m else 16.0
+        mnodes.append('<circle class="%s" cx="%.1f" cy="%.1f" r="%.1f"><title>%s%s</title></circle>'
+                      % (cls, cx, cy, _r, lbl, "" if used else " (unused)"))
+        mnodes.append('<text class="mnodelbl" x="%.1f" y="%.1f">%s</text>'
+                      % (cx + _r + 12, cy + 27, lbl))
     nodes_svg = "".join(mnodes)
+
+    # ---- circles (roundabout rings): (x, y, radius_m, label) ----
+    rings = []
+    for item in (circles or []):
+        cx_, cy_, rr = float(item[0]), float(item[1]), float(item[2])
+        lbl = str(item[3]) if len(item) > 3 else ""
+        rings.append('<circle class="ring" cx="%.1f" cy="%.1f" r="%.1f"><title>%s r=%.0f m</title></circle>'
+                     % (sx(cx_), sy(cy_), rr, lbl, rr))
+        if lbl:
+            rings.append('<text class="ringlbl" x="%.1f" y="%.1f">%s</text>'
+                         % (sx(cx_) + rr + 12, sy(cy_) + 27, lbl))
+    rings_svg = "".join(rings)
     n_tn = sum(1 for n in (nodes or []) if n[3] == "TN")
     n_rn = sum(1 for n in (nodes or []) if n[3] == "RN")
 
+    bands_on = bool(meta.get("bands_default", False))
+    band_cls = "" if bands_on else " hidden"
+    band_chk = " checked" if bands_on else ""
     opts = "".join('<option value="%s">%s</option>' % (p, p)
                    for p in sorted(pairs_seen))
     meta_line = (
@@ -227,11 +245,11 @@ def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
 <style>
   :root { --bg:#f7f9fc; --ink:#1a2230; --obst:#aeb7c4; --grid:#e6ebf2; }
   * { box-sizing:border-box; }
-  body { margin:0; font:13px/1.4 -apple-system,Segoe UI,Roboto,sans-serif;
+  body { margin:0; font:14px/1.45 -apple-system,Segoe UI,Roboto,sans-serif;
          color:var(--ink); background:var(--bg); }
   header { padding:10px 14px; border-bottom:1px solid var(--grid); }
-  h1 { font-size:15px; margin:0 0 3px; }
-  .meta { color:#5b6675; font-size:12px; }
+  h1 { font-size:17px; margin:0 0 3px; }
+  .meta { color:#5b6675; font-size:13px; }
   .controls { display:flex; flex-wrap:wrap; gap:14px; align-items:center;
               padding:8px 14px; border-bottom:1px solid var(--grid); }
   .controls label { display:flex; gap:5px; align-items:center; cursor:pointer; }
@@ -240,7 +258,7 @@ def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
   svg { width:100%; height:100%; display:block; cursor:grab; }
   svg.grabbing { cursor:grabbing; }
   #obst rect { fill:var(--obst); }
-  .buffer  { fill:rgba(16,40,220,.09); stroke:none; }
+  .buffer  { fill:rgba(220,80,16,.14); stroke:rgba(220,80,16,.35); stroke-width:2; }
   .corridor{ fill:rgba(16,40,220,.20); stroke:none; }
   .route   { fill:none; stroke-linejoin:round; stroke-linecap:round; }
   .route.primary { stroke:#1030e0; stroke-width:2.2; opacity:.95; }
@@ -248,17 +266,20 @@ def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
   .route:hover   { stroke:#ff7a00; stroke-width:3.4; opacity:1; }
   .obj.db { fill:#c0392b; stroke:#222; stroke-width:1.5; }
   .obj.dk { fill:#1f6f3f; stroke:#222; stroke-width:1.5; }
-  .objlbl { font:bold 15px sans-serif; fill:#111; paint-order:stroke;
-            stroke:#fff; stroke-width:3px; }
+  .objlbl { font:bold 90px sans-serif; fill:#111; paint-order:stroke;
+            stroke:#fff; stroke-width:9px; }
   .frame { fill:none; stroke:#3a4657; stroke-width:8; }
+  .ring { fill:rgba(232,53,42,.06); stroke:#e8352a; stroke-width:4; }
+  .ringlbl { font:bold 78px sans-serif; fill:#a02018; paint-order:stroke;
+             stroke:#fff; stroke-width:12px; }
   .mnode { stroke:#fff; stroke-width:2.5; }
   .mnode.tn { fill:#e8710a; }
   .mnode.rn { fill:#d000d0; }
   .mnode.unused { fill:#fff; stroke-width:3.5; opacity:.9; }
   .mnode.tn.unused { stroke:#e8710a; }
   .mnode.rn.unused { stroke:#d000d0; }
-  .mnodelbl { font:bold 22px sans-serif; fill:#222; paint-order:stroke;
-              stroke:#fff; stroke-width:4px; }
+  .mnodelbl { font:bold 78px sans-serif; fill:#222; paint-order:stroke;
+              stroke:#fff; stroke-width:12px; }
   .hidden { display:none; }
   .legend { position:absolute; right:10px; bottom:10px; background:rgba(255,255,255,.9);
             border:1px solid var(--grid); border-radius:6px; padding:8px 10px; font-size:12px; }
@@ -276,8 +297,9 @@ def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
   <label><input type="checkbox" id="cFrame" checked> frame</label>
   <label><input type="checkbox" id="cGrid"> grid nodes</label>
   <label><input type="checkbox" id="cNodes" checked> model nodes</label>
-  <label><input type="checkbox" id="cCorr"> corridor band</label>
-  <label><input type="checkbox" id="cBuf"> buffer band</label>
+  <label><input type="checkbox" id="cRings" checked> roundabouts</label>
+  <label><input type="checkbox" id="cCorr"__CHK__> corridor band</label>
+  <label><input type="checkbox" id="cBuf"__CHK__> buffer band</label>
   <label><input type="checkbox" id="cPrim"> primary routes only</label>
   <label>pair:
     <select id="cPair"><option value="all">all</option>__OPTS__</select>
@@ -297,9 +319,10 @@ def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
       <g id="fields">__FIELDS__</g>
       <g id="obst">__OBST__</g>
       <g id="grid" class="hidden"><rect x="0" y="0" width="__W__" height="__H__" fill="url(#gridpat)"/></g>
-      <g id="bufs" class="hidden">__BUFS__</g>
-      <g id="corr" class="hidden">__CORR__</g>
+      <g id="bufs" class="__BCLS__">__BUFS__</g>
+      <g id="corr" class="__BCLS__">__CORR__</g>
       <g id="routes">__LINES__</g>
+      <g id="rings">__RINGS__</g>
       <g id="nodes">__NODES__</g>
       <g id="objs">__OBJS__</g>
       <g id="frame">__FRAME__</g>
@@ -331,6 +354,7 @@ def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
           g.classList.toggle('hidden', g.id !== 'field-' + v); }); });
   tog('cFrame', document.getElementById('frame'));
   tog('cNodes', document.getElementById('nodes'));
+  tog('cRings', document.getElementById('rings'));
   document.getElementById('cCorr').addEventListener('change',function(){
       document.getElementById('corr').classList.toggle('hidden', !this.checked); });
   document.getElementById('cBuf').addEventListener('change',function(){
@@ -370,6 +394,8 @@ def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
     doc = (tmpl.replace("__TITLE__", str(meta.get("title", "Route network")))
                .replace("__META__", meta_line)
                .replace("__OPTS__", opts)
+               .replace("__CHK__", band_chk)
+               .replace("__BCLS__", band_cls.strip())
                .replace("__DX__", "%.3f" % dx)
                .replace("__FIELDS__", field_layers_svg)
                .replace("__FIELDOPTS__", field_opts_svg)
@@ -380,6 +406,7 @@ def render_route_html(out_html, routes_xy, obj_xy, nofly, extent, dx,
                .replace("__CORR__", "".join(corridors))
                .replace("__LINES__", "".join(lines))
                .replace("__NODES__", nodes_svg)
+               .replace("__RINGS__", rings_svg)
                .replace("__FRAME__", frame_svg)
                .replace("__OBJS__", objs_svg))
     Path(out_html).write_text(doc, encoding="utf-8")
