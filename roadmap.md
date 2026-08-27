@@ -321,9 +321,9 @@ for the same reason. Makespan is unchanged — the dock pads still set it.
 
 # Next steps
 
-Three tracks. The stress tests are listed last but come first in priority,
-because every number in this document is from **one map seed and one fleet
-seed** — see *Methodological gap* below.
+**The next move is 3-D.** VO-MPC, MARL and the stress-test programme below are
+postponed — they are kept because each is specified against a defect this
+document records, and none of that analysis expires.
 
 Anything new goes in a sibling `07x_simulate_<method>_*` per the convention in
 [PIPELINE.md](PIPELINE.md), so it can be compared against the scheduling build on
@@ -331,7 +331,71 @@ the same network rather than replacing it.
 
 ---
 
-## A. VO-MPC
+## 0. Moving to 3-D — the active track
+
+### What "2-D" currently means here
+
+The model is better described as **2.5-D than 2-D**, and the difference decides
+how much work the move actually is:
+
+| already present | but |
+|---|---|
+| `FLIGHT_LEVELS = 6` altitude bands, `LEVEL_SEP_M = 30` | a level is a property of the **leg** (`agent_level(a) = leg_level(a.cur_seg())`). It is assigned by the leg and **never changes in flight** — there is no climb or descent |
+| the map carries a `z` column | every value is **0.0**. Obstacles are 2-D discs with no height, so nothing can be flown *over* |
+| separation is checked per level | different levels are assumed **perfectly separated** — `same_level` gates the test, and no vertical geometry is ever evaluated |
+| pyvista renders the levels stacked | display only; the levels are not a planning dimension |
+
+So the vertical axis exists as a **label**, not as geometry. That is the gap to
+close.
+
+### What the move touches, stage by stage
+
+1. **Stage 01 — give obstacles height.** A `z_max` per obstacle turns the map
+   from discs into a true volume, which is what makes "fly over it" a decision
+   rather than an impossibility. This is the change everything else depends on.
+2. **Stage 02/04 — plan in 3-D.** `src/fmm.py` solves the Eikonal equation on a
+   2-D grid; the method itself is dimension-agnostic, so the solver generalises
+   to a voxel grid, but memory goes as the third power — a 101×101 grid becomes
+   101×101×N_z. Expect to need a coarser vertical resolution than horizontal.
+3. **Stage 06 — the cost layers become volumes.** Ground risk genuinely depends
+   on altitude (higher = wider ballistic footprint but more glide time to an
+   FLZ), so the ground layer stops being a 2-D field and gains real structure.
+   The economic and air layers extend more simply.
+4. **Stage 07 — the real work.**
+   * **Continuous altitude with climb/descent.** The power model
+     `P(v) = p0 + cd·v³` has **no vertical term**; climbing is currently free.
+     A climb power term is required before any 3-D energy result means anything,
+     and note that the energy gate is already tuned against the 2-D model.
+   * **A true 3-D separation standard** — a cylinder (50 m horizontal AND 30 m
+     vertical) replacing "different level ⇒ safe". This will *raise* the
+     reported violation rate, because pairs currently exempted by the
+     `same_level` gate start being checked.
+   * **3-D ORCA.** ORCA generalises cleanly — half-**spaces** instead of
+     half-planes, and the linear program becomes 3-D. `src/orca.py` is 2-D
+     throughout (`_det`, the leg construction, `circle_bound_line`), so this is
+     a rewrite of the geometry, not a parameter change. The validation suite in
+     its docstring should be extended alongside.
+   * **Level change as a coordination resource.** The thing the current model
+     structurally cannot express: climb to overtake, or to resolve a merge. This
+     is the payoff — it directly attacks the two largest remaining violation
+     groups, cross-leg junctions (58 %) and the ring-boundary seam (42 %), both
+     of which are conflicts between agents that simply have nowhere to go.
+
+### Carry these forward
+
+* **Every result to date is one map seed and one fleet seed** (see the
+  methodological gap below). Do not use the 2-D numbers as a baseline for 3-D
+  without first establishing their spread.
+* **Collisions are still not modelled**, and in 3-D the `same_level` exemption
+  that hid some encounters disappears — so the violation counts will move for
+  two different reasons at once. Add the collision metric *before* the move, or
+  the two effects cannot be told apart.
+* Keep 2-D runnable. The branch structure already supports a parallel build; a
+  3-D stage set should sit beside the 2-D one, not replace it.
+
+---
+
+## A. VO-MPC — postponed
 
 Today's tactical layer is **VO but not MPC**: ORCA solves one linear program for
 the next velocity. `ORCA_TAU_S = 4.0` is the geometric look-ahead of the velocity
@@ -370,7 +434,7 @@ by category, achieved velocity, makespan, and solve time per agent-step.
 
 ---
 
-## B. Multi-agent reinforcement learning
+## B. Multi-agent reinforcement learning — postponed
 
 The simulator is already close to an environment — state, action and reward all
 exist as quantities the engine computes.
@@ -405,7 +469,7 @@ learning rather than to the environment having changed.
 
 ---
 
-## C. Stress tests
+## C. Stress tests — postponed
 
 ### Methodological gap to close first
 

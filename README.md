@@ -176,5 +176,5 @@ Worth opening first:
 
 See [PIPELINE.md](PIPELINE.md) for what each stage does, and [roadmap.md](roadmap.md)
 for how the current design was arrived at — including its **known limits** and the
-**next steps** (VO-MPC, multi-agent RL, and the stress tests that should come first,
-since every result so far is from a single seed).
+**next steps**. The active track is the move to **3-D**; VO-MPC, multi-agent RL and
+the stress-test programme are specified there but postponed.
