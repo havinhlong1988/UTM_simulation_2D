@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-engine_simulate.py
+engine_simulate_scheduling.py
 
 Multi-agent 2D corridor traffic simulation on the shared UAV network
 built by 07_build_corridor_network.py.
@@ -76,9 +76,9 @@ by every output.
 
 Run
 ---
-    python engine_simulate.py
-    python engine_simulate.py --param-file params/simulate_agents_2d.params
-    python engine_simulate.py --agents 60 --hours 4 --seed 7 --no-animation
+    python engine_simulate_scheduling.py
+    python engine_simulate_scheduling.py --param-file params/simulate_agents_2d.params
+    python engine_simulate_scheduling.py --agents 60 --hours 4 --seed 7 --no-animation
 
 Explicit CLI flags override the params file.
 
@@ -4170,7 +4170,7 @@ def main() -> None:
     fig_dir.mkdir(parents=True, exist_ok=True)
 
     print("=" * 66)
-    print(f"engine_simulate.py  {VERSION}")
+    print(f"engine_simulate_scheduling.py  {VERSION}")
     print(f"Param file    : {args.param_file}")
     print(f"Corridor dir  : {corridor_dir}")
     print(f"Output dir    : {output_dir}")

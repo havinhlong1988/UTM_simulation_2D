@@ -19,7 +19,7 @@ B = "b_theta"
 if __name__ == "__main__":
     sys.argv = [str(HERE / "engine_costmap.py"),
                 "--param-file", f"params/{B}/06_costmap.params",
-                "--traffic", f"output/{B}/07_agent_sim/trajectories.csv",
+                "--traffic", f"output/{B}/07_agent_sim_scheduling/trajectories.csv",
                 "--corridor-dir", f"output/{B}/05_corridor_network",
                 "--corridor-param-file", f"params/{B}/05_corridor_network.params",
                 "--out-dir", f"output/{B}/06_costmap",

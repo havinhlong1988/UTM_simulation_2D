@@ -4,7 +4,7 @@
 src/orca.py -- Optimal Reciprocal Collision Avoidance (ORCA) in 2D.
 
 A dependency-free (numpy only) implementation of van den Berg et al.'s ORCA,
-used by engine_simulate.py inside the roundabout zones. Like src/fmm.py, this
+used by engine_simulate_scheduling.py inside the roundabout zones. Like src/fmm.py, this
 is a compact standalone implementation rather than a third-party dependency:
 the reference RVO2 binding needs a Cython build, and the AVOCADO fork that
 extends it is AGPL-3.0, which would be viral over this project's outputs.

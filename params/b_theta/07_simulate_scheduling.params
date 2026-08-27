@@ -18,7 +18,7 @@
 
 # Input / output ------------------------------------------------------
 CORRIDOR_DIR = "output/b_theta/05_corridor_network"
-OUTPUT_DIR   = "output/b_theta/07_agent_sim"
+OUTPUT_DIR   = "output/b_theta/07_agent_sim_scheduling"
 # Slowness cost-map from 08_generate_costmap.py (true velocity = slowness x
 # base speed). If the file is absent, base speeds are used.
 COST_MAP_FILE = "output/b_theta/06_costmap/slowness_costmap.npz"

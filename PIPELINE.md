@@ -13,7 +13,7 @@ Every stage exists as `NN a` and `NN b`: **a = FMM**, **b = Theta***.
 | 04 | `04a_master_corridor_fmm.py` | `04b_master_corridor_thetastar.py` | re-plan DB↔DK through the TN network |
 | 05 | `05a_corridor_network_fmm.py` | `05b_corridor_network_thetastar.py` | node circles, 2 lanes per leg, roundabouts |
 | 06 | `06a_costmap_fmm.py` | `06b_costmap_thetastar.py` | price the network → slowness cost-map |
-| 07 | `07a_simulate_fmm.py` | `07b_simulate_thetastar.py` | coordination: scheduling + ORCA |
+| 07 | `07a_simulate_fmm_scheduling.py` | `07b_simulate_thetastar_scheduling.py` | coordination: scheduling + ORCA |
 
 ## Running
 
@@ -38,6 +38,20 @@ radio per component map, an opacity slider, a toggle per model-node family
 coloured by each leg's composite risk, and a cursor readout that reports every
 layer at once. `MAKE_HTML = False` (or `--no-html`) turns it off; it is
 independent of `MAKE_FIGURES`.
+
+## Why stage 07 carries a `_scheduling` suffix
+
+`07[ab]_simulate_*_scheduling.py`, `engine_simulate_scheduling.py`,
+`params/<branch>/07_simulate_scheduling.params` and
+`output/<branch>/07_agent_sim_scheduling/` are named for the coordination method
+they implement: departures are planned ahead as CTOTs (with dock-pad and energy
+feasibility booked before launch) and separation is kept tactically in flight,
+with ORCA inside the roundabouts. The suffix is deliberate — a different
+coordination model (reservation-based 4-D contracts, market/priority auctions,
+free-flight self-separation) belongs in a sibling `07x_simulate_<method>_*`
+rather than silently replacing this one, so the two can be compared on the same
+network. Nothing else in the pipeline hard-codes the stage-07 name; the runners
+and stage 06's `--traffic` path are the only references.
 
 ## Coordination (stages 05 → 07)
 
