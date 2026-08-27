@@ -107,6 +107,7 @@ import ast
 import json
 import math
 from collections import defaultdict
+import sys
 from pathlib import Path
 from typing import Any
 
@@ -118,10 +119,19 @@ import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.lines import Line2D
 
+# This engine lives in src/ but is anchored on the PROJECT ROOT: every path it
+# resolves -- params files, output trees, and the root-level stage scripts -- is
+# written relative to the root, not to src/. Put the root on sys.path too, so
+# `from src.x import y` works whether this file is run through its launcher
+# (runpy from the root) or directly as `python src/engine_*.py`.
+_ROOT = Path(__file__).resolve().parent.parent
+if str(_ROOT) not in sys.path:
+    sys.path.insert(0, str(_ROOT))
+
 from src.maprule import add_map_rule
 from src.orca import orca_step
 
-THIS_DIR = Path(__file__).resolve().parent
+THIS_DIR = _ROOT          # project root: all params/output paths hang off it
 VERSION = "v1"
 
 

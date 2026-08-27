@@ -41,7 +41,7 @@ independent of `MAKE_FIGURES`.
 
 ## Why stage 07 carries a `_scheduling` suffix
 
-`07[ab]_simulate_*_scheduling.py`, `engine_simulate_scheduling.py`,
+`07[ab]_simulate_*_scheduling.py`, `src/engine_simulate_scheduling.py`,
 `params/<branch>/07_simulate_scheduling.params` and
 `output/<branch>/07_agent_sim_scheduling/` are named for the coordination method
 they implement: departures are planned ahead as CTOTs (with dock-pad and energy
@@ -87,11 +87,20 @@ records where each loss happened.
 ## Layout
 
 ```
-engine_*.py          shared implementations (route plan, density, corridor
-                     network, cost-map, simulation)
-NN[ab]_*.py          branch launchers -- thin, they call an engine with the
-                     branch's parameters. 04a/04b are the exception: the two
-                     master-corridor solvers are genuinely different code.
+<root>/NN[ab]_*.py     the ONLY .py in the root: thin branch launchers that
+                     call an engine with the branch's parameters. 04a/04b are
+                     the exception -- the two master-corridor solvers are
+                     genuinely different code, so they are real scripts.
+src/engine_*.py      shared implementations (route plan, density, corridor
+                     network, cost-map, simulation). They live in src/ but are
+                     ANCHORED ON THE PROJECT ROOT: params, output trees and the
+                     root-level 04a/04b scripts are all addressed relative to
+                     the root, so each engine sets THIS_DIR to its parent's
+                     parent and puts the root on sys.path. That means an engine
+                     runs the same through its launcher, directly as
+                     `python src/engine_x.py`, or from any working directory.
+src/*.py             libraries the engines import (fmm, orca, thetastar,
+                     maprule, route_html, costmap_html, model_io, ...)
 params/a_fmm/        parameters for branch (a)
 params/b_theta/      parameters for branch (b)
 output/a_fmm/        results of branch (a)
