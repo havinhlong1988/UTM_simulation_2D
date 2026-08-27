@@ -3149,6 +3149,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         </label>
         <label class="sp"><input type="checkbox" id="cmtoggle" checked> costmap</label>
         <label class="sp"><input type="checkbox" id="linktoggle" checked> interactions</label>
+        <label class="sp"><input type="checkbox" id="idtoggle"> agent id</label>
       </div>
       <div class="controls"><input type="range" id="scrub" min="0" value="0" step="1"></div>
     </div>
@@ -3234,7 +3235,8 @@ function buildCostmap(){
 }
 buildCostmap();
 let showCostmap = !!DATA.costmap;
-let showLinks = true;    // draw inter-agent reference links (same-level proximity)
+let showLinks = true;     // draw inter-agent reference links (same-level proximity)
+let showIds = false;      // agent index labels: off by default, decluttered when on
 
 function drawNetwork(){
   ctx.clearRect(0,0,W,H);
@@ -3307,7 +3309,7 @@ function draw(k, f){
   for(const r of frameAt(k)){
     let px=r[0], py=r[1];
     if(nxt){ const q=nxt.get(r[4]); if(q){ px=r[0]+(q[0]-r[0])*f; py=r[1]+(q[1]-r[1])*f; } }
-    AN.push({px, py, cat:r[2], hold:r[3], cls:r[5], lev:(r[6]|0)});
+    AN.push({px, py, cat:r[2], hold:r[3], cls:r[5], lev:(r[6]|0), aid:r[4]});
   }
   // inter-agent reference links (drawn UNDER the glyphs): every agent related to
   // the same-level neighbours whose separation constrains its motion.
@@ -3322,6 +3324,29 @@ function draw(k, f){
     else shape(X,Y,a.cls,4.2);          // a.cls = speed class 0/1/2
     if(a.hold){ hold++; ctx.strokeStyle='#ff8c1a'; ctx.lineWidth=2.0;
       ctx.beginPath(); ctx.arc(X,Y,7.5,0,7); ctx.stroke(); }
+  }
+  // agent index next to each glyph. DECLUTTERED: a label is skipped when one is
+  // already drawn within ID_MIN_PX on screen, so the map stays readable at full
+  // extent and more ids appear as you zoom in, instead of 150 overlapping
+  // numbers. Patrols are labelled P<n> -- their raw ids start at 1,000,000.
+  if(showIds){
+    const placed=[]; const ID_MIN_PX=26;
+    ctx.font='10px ui-monospace,Menlo,monospace'; ctx.textAlign='left';
+    ctx.lineWidth=2.6; ctx.strokeStyle='rgba(255,255,255,.92)';
+    for(const a of AN){
+      const X=TX(a.px), Y=TY(a.py);
+      if(X<-20||Y<-20||X>W+20||Y>H+20) continue;
+      let clash=false;
+      for(const q of placed){
+        if(Math.abs(q[0]-X)<ID_MIN_PX && Math.abs(q[1]-Y)<ID_MIN_PX){ clash=true; break; }
+      }
+      if(clash) continue;
+      placed.push([X,Y]);
+      const lbl = a.cat===2 ? ('P'+(a.aid-1000000)) : String(a.aid);
+      ctx.strokeText(lbl, X+7, Y-6);
+      ctx.fillStyle = a.cat===2 ? '#6b4fa8' : '#111';
+      ctx.fillText(lbl, X+7, Y-6);
+    }
   }
   // conflicts: red stars (loss of time separation)
   const cf=(DATA.conflicts&&DATA.conflicts[k])||[];
@@ -3408,6 +3433,9 @@ if(cmtoggle){ cmtoggle.disabled=!DATA.costmap; cmtoggle.checked=showCostmap;
 const linktoggle=document.getElementById('linktoggle');
 if(linktoggle){ linktoggle.checked=showLinks;
   linktoggle.onchange=e=>{ showLinks=e.target.checked; redraw(); }; }
+const idtoggle=document.getElementById('idtoggle');
+if(idtoggle){ idtoggle.checked=showIds;
+  idtoggle.onchange=e=>{ showIds=e.target.checked; redraw(); }; }
 
 document.getElementById('meta').innerHTML =
   `<h2>Scenario</h2>`+
@@ -3632,7 +3660,8 @@ _AGENT_HTML_TEMPLATE = r"""<!DOCTYPE html>
           <option value="1" selected>1&times;</option><option value="2">2&times;</option>
           <option value="4">4&times;</option><option value="8">8&times;</option></select></label>
         <label class="sp"><input type="checkbox" id="cmtoggle" checked> costmap</label>
-        <label class="sp"><input type="checkbox" id="linktoggle" checked> interactions</label></div>
+        <label class="sp"><input type="checkbox" id="linktoggle" checked> interactions</label>
+        <label class="sp"><input type="checkbox" id="idtoggle" checked> agent id</label></div>
       <div class="stat"><span>Other agents now</span><b id="near">0</b></div>
       <div class="stat"><span>Too-close now</span><b id="tclose" style="color:#e23b3b">0</b></div>
       <div class="controls"><input type="range" id="scrub" min="0" value="0" step="1"></div></div>
@@ -3674,6 +3703,7 @@ function buildCostmap(){ const CM=NET.costmap; if(!CM) return;
 buildCostmap();
 let showCostmap=!!NET.costmap;
 let showFLinks=true;    // draw this agent's reference links to same-level neighbours
+let showIds = true;       // neighbour agent ids: ON here -- few enough to stay legible
 
 function bg(){
   ctx.clearRect(0,0,W,H); ctx.fillStyle='#fff'; ctx.fillRect(0,0,W,H);
@@ -3718,6 +3748,7 @@ function diamond(X,Y,R){ ctx.beginPath();
 // other agents sharing the airspace at global frame kg (interpolated by f)
 function others(kg,f){ const cur=FR[kg]||[]; let nxt=null, n=0;
   if(f>0 && kg+1<FR.length){ nxt=new Map(); for(const q of FR[kg+1]) nxt.set(q[4],q); }
+  const idPlaced=[];   // declutter: drop a label that would sit on another
   for(const r of cur){ if(r[4]===F.aid) continue; n++;
     let px=r[0],py=r[1];
     if(nxt){ const q=nxt.get(r[4]); if(q){ px=r[0]+(q[0]-r[0])*f; py=r[1]+(q[1]-r[1])*f; } }
@@ -3728,6 +3759,22 @@ function others(kg,f){ const cur=FR[kg]||[]; let nxt=null, n=0;
     } else {
       ctx.globalAlpha=0.55; ctx.fillStyle=COL[r[2]];
       ctx.beginPath(); ctx.arc(X,Y,2.7,0,7); ctx.fill(); ctx.globalAlpha=1;
+    }
+    // label WHO the neighbour is -- on this page the whole point of the other
+    // agents is identifying the one this drone is interacting with
+    if(showIds){
+      let clash=false;
+      for(const q of idPlaced){
+        if(Math.abs(q[0]-X)<18 && Math.abs(q[1]-Y)<12){ clash=true; break; } }
+      if(!clash){
+        idPlaced.push([X,Y]);
+        const lbl = r[2]===2 ? ('P'+(r[4]-1000000)) : String(r[4]);
+        ctx.font='10px ui-monospace,Menlo,monospace'; ctx.textAlign='left';
+        ctx.lineWidth=2.6; ctx.strokeStyle='rgba(255,255,255,.92)';
+        ctx.strokeText(lbl, X+5, Y-5);
+        ctx.fillStyle = r[2]===2 ? '#6b4fa8' : '#333';
+        ctx.fillText(lbl, X+5, Y-5);
+      }
     } }
   for(const c of (CONF[kg]||[])) star(TX(c[0]),TY(c[1]),6);
   return n; }
@@ -3798,6 +3845,9 @@ if(cmtoggle){ cmtoggle.disabled=!NET.costmap; cmtoggle.checked=showCostmap;
 const linktoggle=document.getElementById('linktoggle');
 if(linktoggle){ linktoggle.checked=showFLinks;
   linktoggle.onchange=e=>{ showFLinks=e.target.checked; redraw(); }; }
+const idtoggle=document.getElementById('idtoggle');
+if(idtoggle){ idtoggle.checked=showIds;
+  idtoggle.onchange=e=>{ showIds=e.target.checked; redraw(); }; }
 const S=F.stats;
 const row=(k,v)=>`<div class="stat"><span>${k}</span><b>${v}</b></div>`;
 document.getElementById('info').innerHTML='<h2>Mission</h2>'+
