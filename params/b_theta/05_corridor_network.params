@@ -31,7 +31,7 @@ NETWORK_INCLUDE_MINOR_TN = True
 # longer than LEG_MAX_DETOUR_RATIO x the straight distance are dropped.
 LEG_KNN_K = 5
 LEG_MAX_LENGTH_M = 2500.0
-LEG_CLEARANCE_M = 50.0
+LEG_CLEARANCE_M = 70.0
 LEG_MAX_DETOUR_RATIO = 2.0
 
 # Corridors may only meet AT network nodes: connections that cross
@@ -46,7 +46,7 @@ LEG_SKIP_CROSSING = True
 # wherever the straight segment keeps LEG_SMOOTH_CLEARANCE_M to every
 # no-fly node, so the offset lanes come out straight too.
 LEG_SMOOTH_ENABLE = True
-LEG_SMOOTH_CLEARANCE_M = 50.0
+LEG_SMOOTH_CLEARANCE_M = 70.0
 
 # ----------------------------------------------------------------------
 # Two parallel corridors per connection (dual-parallel soft buffer, 06)
@@ -63,7 +63,7 @@ MIN_CENTERLINE_SEPARATION_M = 50.0
 # centerline that touch the outside of each circle -- no perpendicular
 # connector stubs anywhere. Keep this equal to
 # MIN_CENTERLINE_SEPARATION_M so the tangency is exact.
-NODE_CIRCLE_DIAMETER_M = 50.0
+NODE_CIRCLE_DIAMETER_M = 75.0
 # When one symmetric tangent offset side is blocked by an obstacle
 # (e.g. DK02-DK05 threads a no-fly gap off-center), the whole lane pair
 # is shifted sideways off the centerline -- separation preserved -- by
@@ -80,7 +80,7 @@ LANE_SHIFT_STEP_M = 5.0
 # node_shift_m.
 NODE_SHIFT_ENABLE = True
 NODE_SHIFT_MAX_M = 50.0
-NODE_SHIFT_MAX_PASSES = 2
+NODE_SHIFT_MAX_PASSES = 4
 
 # ----------------------------------------------------------------------
 # Backup TN suggestion (purple)
@@ -165,8 +165,15 @@ LEG_FIGURE_DPI = 160
 ROUNDABOUT_ENABLE            = True
 ROUNDABOUT_MIN_DEGREE        = 5       # min incident legs for a node to seed a ring
 ROUNDABOUT_MERGE_RADIUS_M    = 60.0   # a 40 m ring cannot encircle a cluster
-ROUNDABOUT_MIN_RADIUS_M      = 40.0   # fixed 40 m rings
-ROUNDABOUT_MAX_RADIUS_M      = 40.0   # fixed 40 m rings
+# Ring size is now ADAPTIVE, so that busy junctions get a real manoeuvring
+# area for the ORCA zone in stage 07 instead of a 1-D circle. A 40 m ring has
+# a 251 m circumference, which at the 50 m separation standard holds only FIVE
+# agents -- the stage-07 run peaked at NINE on the busiest ring, so the ring
+# was 1.8x oversubscribed and no coordination algorithm could have held the
+# standard there. ORCA needs 2-D room, roughly r >= sqrt(k / (density * fill))
+# = 91 m for 4 agents, 136 m for 9, at 50 m spacing and 1/3 working fill.
+ROUNDABOUT_MIN_RADIUS_M      = 40.0    # quiet junctions stay compact
+ROUNDABOUT_MAX_RADIUS_M      = 150.0   # enough 2-D room for ~9 agents at 50 m
 # Per-ring radius CAP, keyed by any member node label (stable across ring
 # renumbering). Only ever shrinks a ring. Use to tame an over-large ring that
 # crowds nearby corridors -- e.g. RBT01 (MAJ013+MIN001+MIN002) hits the 450 m
@@ -184,12 +191,29 @@ ROUNDABOUT_RADIUS_OVERRIDES  = {}   # overrides cleared (fixed radius)
 #   RBT05->RBT08 (the RBT03->RBT05 route) bundles with DB01->RBT05 below it,
 #   with room above -> bow 45 m up.
 LEG_LATERAL_SHIFTS           = {"DB02__MIN016": 60.0, "RBT05__RBT08": (45.0, "up")}
-ROUNDABOUT_MEMBER_MARGIN_M   = 0.0   # no growth: radius is fixed
-# Ring size scales with TRAFFIC DENSITY: radius += GAIN * (entering legs), so
-# busier junctions get a bigger roundabout.
-ROUNDABOUT_DENSITY_GAIN_M    = 0.0   # no growth: radius is fixed
+ROUNDABOUT_MEMBER_MARGIN_M   = 0.0   # radius comes from traffic, not member spread
+# Ring size scales with TRAFFIC in two independent terms:
+#   1. TOPOLOGY  radius += DENSITY_GAIN_M * (legs entering the junction).
+#      Counts legs, says nothing about how busy they are.
+#   2. PREDICTED radius += PREDICTED_DENSITY_GAIN_M * d^POW, where d is stage
+#      03's route-density field sampled at the ring centre, normalised 0..1
+#      over the field (p99-capped). This is the "areas predicted to be busy may
+#      grow more" rule -- it sizes the ring by the traffic the network is
+#      predicted to carry, not by how many legs happen to meet there.
+# Both are capped by MAX_RADIUS and then by the physical fit below.
+ROUNDABOUT_DENSITY_GAIN_M    = 6.0
+ROUNDABOUT_PREDICTED_DENSITY_GAIN_M = 70.0
+ROUNDABOUT_PREDICTED_DENSITY_POW    = 0.7   # <1 = generous to mid-density areas
+ROUNDABOUT_DENSITY_FILE      = "output/b_theta/03_route_density/route_density.npz"
+ROUNDABOUT_DENSITY_KEY       = "density"
 ROUNDABOUT_LANE_GAP_M        = 0.0   # 0 = SINGLE ring (inner lane collapses onto the outer)
-ROUNDABOUT_OBSTACLE_CLEARANCE_M = 40.0 # keep ring this far from no-fly cells
+# Obstacle clearance is applied to the ring's OUTER BUFFER EDGE (radius +
+# CORRIDOR_DIAMETER/2), not the centreline -- so the ring BUFFER can never fall
+# into a no-fly cell it is nominally clear of. _fit_ring nudges the centre off
+# obstacles first and only shrinks the radius as a last resort; roundabouts.csv
+# records radius_desired_m and radius_limited_by so a ring that had to shrink
+# is visible rather than silent.
+ROUNDABOUT_OBSTACLE_CLEARANCE_M = 40.0 # keep the ring BUFFER this far from no-fly
 ROUNDABOUT_RING_GAP_M        = 40.0    # min gap between two rings
 # When a ring cannot fit (obstacle / another ring) the CENTRE is nudged away
 # (estimated from centre+radius) up to NUDGE_MAX over NUDGE_PASSES before the
@@ -209,3 +233,27 @@ RING_SEPARATION_ENABLE       = True
 RING_CORRIDOR_SEPARATION_M   = 50.0    # min gap: near lane centerline -> ring outer lane
 RING_DETOUR_SAMPLE_M         = 15.0    # centerline re-sampling step for the bend
 RING_DETOUR_MAX_PASSES       = 3       # re-check/shift iterations (multi-ring convergence)
+
+# ----------------------------------------------------------------------
+# Lane clearance repair (final pass)
+# ----------------------------------------------------------------------
+# The leg centreline is planned with LEG_CLEARANCE_M, but the two lane
+# centrelines sit a node radius to either side of it and the shifted /
+# soft-buffer fallbacks move them further, so a lane BAND can still end up over
+# an obstacle. This pass takes the final lanes and bends any intruding stretch
+# away from the no-fly cells, then smooths the detour.
+LANE_REPAIR_ENABLE = True
+LANE_CLEARANCE_MARGIN_M = 5.0   # required = CORRIDOR_DIAMETER/2 + this
+LANE_REPAIR_MAX_PASSES  = 20
+LANE_REPAIR_SAMPLE_M    = 10.0
+# If bending a lane is not enough, MOVE the nodes that pin it (any node except a
+# DB/DK objective -- backups and extensions included) and rebuild the network.
+LANE_REPAIR_NODE_SHIFT_PASSES = 3
+LANE_REPAIR_NODE_STEP_M       = 60.0
+# a centreline bent tighter than this x the lane offset folds the inner lane
+LANE_MIN_CURVATURE_FACTOR = 1.2
+# through a bend the outbound/return pair is widened so the inner lane cannot fold
+LANE_PAIR_MAX_WIDEN   = 2.0
+LANE_PAIR_WIDEN_PASSES = 8
+# safety buffer drawn OUTSIDE the usable corridor (HTML only)
+CORRIDOR_BUFFER_M = 12.5

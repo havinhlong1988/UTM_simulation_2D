@@ -146,6 +146,259 @@ def build_network_nodes(df: pd.DataFrame, params: dict[str, Any]) -> pd.DataFram
 # Geometry helpers
 # ======================================================================
 
+def _footprint_gap(pts, nofly_tree, half_cell: float, k: int = 12):
+    """Exact distance from each point to the no-fly FOOTPRINT (the union of
+    half_cell-squares centred on the no-fly nodes), not to the cell centres.
+    Only the k nearest cells matter, so this stays cheap."""
+    if nofly_tree is None or not len(pts):
+        return np.full(len(pts), np.inf)
+    kk = min(k, nofly_tree.n)
+    _, idx = nofly_tree.query(pts, k=kk)
+    idx = np.atleast_2d(idx.T).T if kk > 1 else idx.reshape(-1, 1)
+    cells = nofly_tree.data[idx]                       # (n, k, 2)
+    ddx = np.clip(np.abs(pts[:, None, 0] - cells[:, :, 0]) - half_cell, 0.0, None)
+    ddy = np.clip(np.abs(pts[:, None, 1] - cells[:, :, 1]) - half_cell, 0.0, None)
+    return np.sqrt(ddx * ddx + ddy * ddy).min(axis=1)
+
+
+def shift_nodes_for_lane_clearance(nodes, legs, unresolved, lanes, nofly_tree,
+                                   params, grid_m: float):
+    """Move the END NODES of any leg whose lane still intrudes, away from the
+    obstacle that pins it. Bending the lane was not enough -- the gap it runs
+    through is too narrow -- so the node itself has to give, which changes the
+    leg's direction and usually opens a wider corridor on the rebuild.
+
+    Objectives (DB/DK) are fixed infrastructure and never move; every other node
+    (TN, relief, and the suggested BAK/EXT nodes) may. Returns (nodes, n_moved)."""
+    if not unresolved or nofly_tree is None:
+        return nodes, 0
+    half_cell = 0.5 * float(grid_m)
+    need = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0)) \
+        + float(M6.pget(params, "LANE_CLEARANCE_MARGIN_M", 5.0))
+    max_step = float(M6.pget(params, "LANE_REPAIR_NODE_STEP_M", 60.0))
+
+    legs_by_id = legs.set_index("leg_id") if "leg_id" in legs.columns else legs
+    want: dict[str, np.ndarray] = {}
+    for lid, lane in unresolved:
+        if lid not in legs_by_id.index:
+            continue
+        leg = legs_by_id.loc[lid]
+        g = lanes[(lanes["leg_id"] == lid) & (lanes["lane"] == lane)]
+        if not len(g):
+            continue
+        xy = g.sort_values("seq")[["x", "y"]].to_numpy(float)
+        d = _footprint_gap(xy, nofly_tree, half_cell)
+        k = int(np.argmin(d))
+        if d[k] >= need:
+            continue
+        _, ci = nofly_tree.query(xy[k:k + 1], k=1)
+        obs = nofly_tree.data[np.atleast_1d(ci)[0]]
+        away = xy[k] - obs
+        n = float(np.hypot(*away)) or 1.0
+        push = (away / n) * min(need - float(d[k]) + 5.0, max_step)
+        for nid in (str(leg["a_id"]), str(leg["b_id"])):
+            want[nid] = want.get(nid, np.zeros(2)) + push
+
+    moved = 0
+    for nid, vec in want.items():
+        m = nodes["net_id"].astype(str) == nid
+        if not m.any() or nid.startswith(("DB", "DK")):
+            continue
+        nodes.loc[m, "x"] = nodes.loc[m, "x"].to_numpy(float) + vec[0]
+        nodes.loc[m, "y"] = nodes.loc[m, "y"].to_numpy(float) + vec[1]
+        if "node_shift_m" in nodes.columns:
+            nodes.loc[m, "node_shift_m"] = nodes.loc[m, "node_shift_m"].to_numpy(float) \
+                + float(np.hypot(*vec))
+        moved += 1
+    return nodes, moved
+
+
+def _min_curvature_radius(xy):
+    """Smallest circumscribed-circle radius over consecutive point triples."""
+    if len(xy) < 3:
+        return float("inf")
+    p, q, r = xy[:-2], xy[1:-1], xy[2:]
+    a = np.hypot(*(q - p).T); b = np.hypot(*(r - q).T); c = np.hypot(*(r - p).T)
+    area = np.abs((q[:, 0] - p[:, 0]) * (r[:, 1] - p[:, 1])
+                  - (r[:, 0] - p[:, 0]) * (q[:, 1] - p[:, 1])) / 2.0
+    R = np.where(area > 1e-9, (a * b * c) / (4.0 * area + 1e-12), np.inf)
+    return float(np.min(R))
+
+
+def _limit_curvature(xy, min_radius, max_iter=60):
+    """Smooth a polyline until no bend is tighter than ``min_radius``.
+
+    A centreline bent tighter than the lane offset makes the INNER lane fold
+    back on itself, so two lanes that are a correct 50 m apart station-by-station
+    still come within a few metres somewhere along the fold. Endpoints are held.
+    """
+    out = np.asarray(xy, float).copy()
+    for _ in range(max_iter):
+        if _min_curvature_radius(out) >= min_radius or len(out) < 3:
+            break
+        sm = out.copy()
+        sm[1:-1] = 0.25 * out[:-2] + 0.5 * out[1:-1] + 0.25 * out[2:]
+        out = sm
+    return out
+
+
+def _offset_polyline_var(xy, off):
+    """Parallel offset where ``off`` may vary per point (widen through a bend)."""
+    d = np.gradient(xy, axis=0)
+    n = np.hypot(d[:, 0], d[:, 1]); n[n < 1e-9] = 1e-9
+    nx, ny = -d[:, 1] / n, d[:, 0] / n
+    off = np.asarray(off, float).reshape(-1)
+    return xy + np.column_stack([nx * off, ny * off])
+
+
+def _offset_polyline(xy, off):
+    """Parallel offset of a polyline by ``off`` metres along the local normal."""
+    d = np.gradient(xy, axis=0)
+    n = np.hypot(d[:, 0], d[:, 1]); n[n < 1e-9] = 1e-9
+    nx, ny = -d[:, 1] / n, d[:, 0] / n
+    return xy + np.column_stack([nx, ny]) * off
+
+
+def repair_lane_clearance(lanes: pd.DataFrame, nofly_tree, params: dict[str, Any],
+                          grid_m: float = 50.0):
+    """Bend any leg whose CORRIDOR BAND intrudes into an obstacle back out.
+
+    build_leg_lanes() checks the leg centreline, but the two lane centrelines sit
+    a node radius to either side of it, and the shifted / soft-buffer fallbacks
+    move them further still -- so a lane band can end up over a no-fly cell even
+    though its leg was clear. This pass works on the FINAL geometry (after ring
+    clipping, node shifts and lateral shifts).
+
+    It bends the leg's CENTRELINE, then rebuilds both lanes as parallel offsets
+    of it. Buffers may overlap; the lanes themselves may not -- and rebuilding
+    them from one centreline holds their separation at exactly the lane gap,
+    which pushing the two lanes separately does not (both get shoved toward the
+    same free side and pinch together).
+
+    Returns (lanes, n_repaired, worst_before_m, worst_after_m, unresolved).
+    """
+    if nofly_tree is None or not len(lanes):
+        return lanes, 0, float("inf"), float("inf"), []
+    half_cell = 0.5 * float(grid_m)
+    need_hard = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))
+    need = need_hard + float(M6.pget(params, "LANE_CLEARANCE_MARGIN_M", 5.0))
+    max_pass = int(M6.pget(params, "LANE_REPAIR_MAX_PASSES", 6))
+    step_m = float(M6.pget(params, "LANE_REPAIR_SAMPLE_M", 10.0))
+    min_curv_f = float(M6.pget(params, "LANE_MIN_CURVATURE_FACTOR", 1.2))
+
+    out, n_fixed, unresolved = [], 0, []
+    worst_before, worst_after = float("inf"), float("inf")
+
+    for lid, g_leg in lanes.groupby("leg_id"):
+        parts = {}
+        for ln, g in g_leg.groupby("lane"):
+            xy = g.sort_values("seq")[["x", "y"]].to_numpy(float)
+            if len(xy) >= 2:
+                parts[str(ln)] = M6._resample_polyline_m(xy, step_m)
+            else:
+                out.append((lid, str(ln), xy))
+        names = sorted(parts)
+        if len(names) != 2:                      # single lane: nothing to keep apart
+            for k in names:
+                out.append((lid, k, parts[k]))
+                worst_before = min(worst_before,
+                                   float(_footprint_gap(parts[k], nofly_tree, half_cell).min()))
+                worst_after = worst_before
+            continue
+
+        n_st = max(len(v) for v in parts.values())
+        def _restation(arr):
+            d = np.r_[0.0, np.cumsum(np.hypot(*np.diff(arr, axis=0).T))]
+            t = np.linspace(0.0, d[-1], n_st)
+            return np.column_stack([np.interp(t, d, arr[:, 0]), np.interp(t, d, arr[:, 1])])
+        A, B = _restation(parts[names[0]]), _restation(parts[names[1]])
+
+        d0 = min(float(_footprint_gap(A, nofly_tree, half_cell).min()),
+                 float(_footprint_gap(B, nofly_tree, half_cell).min()))
+        worst_before = min(worst_before, d0)
+        if d0 >= need:
+            out.append((lid, names[0], A)); out.append((lid, names[1], B))
+            worst_after = min(worst_after, d0)
+            continue
+
+        # centreline + the half-gap that reproduces the lanes as offsets
+        centre = 0.5 * (A + B)
+        half_gap = 0.5 * float(np.median(np.hypot(A[:, 0] - B[:, 0], A[:, 1] - B[:, 1])))
+        # WHICH SIDE each lane is on: rebuilding A on B's side would swap the two
+        # and make them cross, which reads as a lane overlap.
+        d_c = np.gradient(centre, axis=0)
+        n_c = np.hypot(d_c[:, 0], d_c[:, 1]); n_c[n_c < 1e-9] = 1e-9
+        nrm = np.column_stack([-d_c[:, 1] / n_c, d_c[:, 0] / n_c])
+        sideA = 1.0 if float(np.sum((A - centre) * nrm)) >= 0.0 else -1.0
+        endA, endB = (A[0].copy(), A[-1].copy()), (B[0].copy(), B[-1].copy())
+        for _ in range(max_pass):
+            L1 = _offset_polyline(centre, sideA * half_gap)
+            L2 = _offset_polyline(centre, -sideA * half_gap)
+            g1 = _footprint_gap(L1, nofly_tree, half_cell)
+            g2 = _footprint_gap(L2, nofly_tree, half_cell)
+            worst_g = np.minimum(g1, g2)
+            viol = worst_g < need
+            viol[0] = viol[-1] = False           # keep the tangent endpoints
+            if not viol.any():
+                break
+            src = np.where((g1 <= g2)[:, None], L1, L2)      # the pinched lane
+            _, idx = nofly_tree.query(src, k=1)
+            obs = nofly_tree.data[np.atleast_1d(idx)]
+            away = src - obs
+            nn = np.hypot(away[:, 0], away[:, 1]); nn[nn < 1e-9] = 1e-9
+            mag = np.where(viol, need - worst_g + 1.0, 0.0)
+            centre = centre + (away / nn[:, None]) * mag[:, None]
+            sm = centre.copy()
+            sm[1:-1] = 0.25 * centre[:-2] + 0.5 * centre[1:-1] + 0.25 * centre[2:]
+            w = mag > 0
+            w[:-1] |= w[1:]; w[1:] |= w[:-1]; w[0] = w[-1] = False
+            centre[w] = sm[w]
+            # A bend tighter than the lane offset folds the inner lane, so cap the
+            # curvature every pass -- smoothing pulls back toward the obstacle, and
+            # the next pass pushes out again, so the two converge together.
+            centre = _limit_curvature(centre, half_gap * min_curv_f)
+
+        # WIDEN THE PAIR THROUGH A BEND. Holding both lanes at a fixed offset makes
+        # the inner one fold where the centreline curves, so the outbound and return
+        # corridors touch even though they are a correct gap apart station by
+        # station. Bending one corridor therefore has to bend its partner AND open
+        # the gap locally: grow the offset where the two still come too close, keep
+        # it smooth, and rebuild the pair from the same centreline.
+        need_pair = 2.0 * half_gap
+        gap_s = np.full(len(centre), half_gap)
+        max_widen = float(M6.pget(params, "LANE_PAIR_MAX_WIDEN", 2.0))
+        for _ in range(int(M6.pget(params, "LANE_PAIR_WIDEN_PASSES", 8))):
+            A2 = _offset_polyline_var(centre, sideA * gap_s)
+            B2 = _offset_polyline_var(centre, -sideA * gap_s)
+            dmin = np.array([np.hypot(B2[:, 0] - x, B2[:, 1] - y).min() for x, y in A2])
+            short = dmin < need_pair
+            if not short.any():
+                break
+            gap_s = gap_s + np.where(short, 0.5 * (need_pair - dmin) + 1.0, 0.0)
+            gap_s = np.minimum(gap_s, half_gap * max_widen)
+            k = np.ones(5) / 5.0                      # keep the widening gradual
+            gap_s = np.convolve(np.r_[[gap_s[0]] * 2, gap_s, [gap_s[-1]] * 2], k, "valid")
+            gap_s[0] = gap_s[-1] = half_gap           # ends stay at the tangent points
+        A2 = _offset_polyline_var(centre, sideA * gap_s)
+        B2 = _offset_polyline_var(centre, -sideA * gap_s)
+        A2[0], A2[-1] = endA; B2[0], B2[-1] = endB      # re-pin the tangent points
+        d1 = min(float(_footprint_gap(A2, nofly_tree, half_cell).min()),
+                 float(_footprint_gap(B2, nofly_tree, half_cell).min()))
+        worst_after = min(worst_after, d1)
+        if d1 < need_hard:
+            unresolved.append((str(lid), names[0]))
+            unresolved.append((str(lid), names[1]))
+        n_fixed += 1
+        out.append((lid, names[0], A2)); out.append((lid, names[1], B2))
+
+    rows = []
+    for lid, lane, xy in out:
+        for s, (x, y) in enumerate(xy):
+            rows.append({"leg_id": lid, "lane": lane, "seq": int(s),
+                         "x": float(x), "y": float(y)})
+    return pd.DataFrame(rows), n_fixed, worst_before, worst_after, unresolved
+
+
 def make_nofly_tree(df: pd.DataFrame, params: dict[str, Any]):
     nofly_thr = float(M6.pget(params, "NOFLY_SLOWNESS_THRESHOLD", 10.0))
     nofly_xy = df.loc[df["slowness"].to_numpy(float) >= nofly_thr, ["x", "y"]].to_numpy(float)
@@ -1359,6 +1612,43 @@ def _fit_ring(center: np.ndarray, radius: float, nofly_tree,
     return center, radius
 
 
+def load_density_field(params: dict[str, Any]):
+    """Stage-03's PREDICTED route-density field, for sizing roundabouts.
+
+    Returns a sampler f(x, y) -> density normalised to [0, 1] over the field's
+    own range, or None when no field is configured/found. The field is the
+    same one stage 03 uses to place traffic nodes, so a ring sized from it is
+    sized by the traffic the network is predicted to carry -- not by junction
+    degree, which only counts legs and says nothing about how busy they are."""
+    f = str(M6.pget(params, "ROUNDABOUT_DENSITY_FILE", "") or "")
+    if not f:
+        return None
+    path = Path(f)
+    if not path.is_absolute():
+        path = Path(__file__).resolve().parent / f
+    if not path.is_file():
+        print(f"  ! density file not found: {f} -- rings sized by entries only")
+        return None
+    z = np.load(path)
+    key = str(M6.pget(params, "ROUNDABOUT_DENSITY_KEY", "density"))
+    if key not in z:
+        key = "density" if "density" in z else list(z.keys())[0]
+    g = np.asarray(z[key], float)
+    x0, y0, dx = float(z["x0"]), float(z["y0"]), float(z["dx"])
+    ny, nx = g.shape
+    lo, hi = float(np.nanmin(g)), float(np.nanpercentile(g, 99.0))
+    span = max(hi - lo, 1e-9)
+
+    def sample(x: float, y: float) -> float:
+        ix = int(np.clip(round((float(x) - x0) / dx), 0, nx - 1))
+        iy = int(np.clip(round((float(y) - y0) / dx), 0, ny - 1))
+        return float(np.clip((g[iy, ix] - lo) / span, 0.0, 1.0))
+
+    print(f"  density field : {path.name} [{key}] {nx}x{ny} @ {dx:.0f} m "
+          f"(range {lo:.1f}..{hi:.1f}, p99 cap)")
+    return sample
+
+
 def build_roundabouts(nodes: pd.DataFrame, legs: pd.DataFrame, nofly_tree,
                       params: dict[str, Any]):
     """Replace high-degree TN junction areas with roundabout ring-nodes.
@@ -1375,6 +1665,12 @@ def build_roundabouts(nodes: pd.DataFrame, legs: pd.DataFrame, nofly_tree,
     obst_clr  = float(M6.pget(params, "ROUNDABOUT_OBSTACLE_CLEARANCE_M", 40.0))
     ring_gap  = float(M6.pget(params, "ROUNDABOUT_RING_GAP_M", 40.0))
     dens_gain = float(M6.pget(params, "ROUNDABOUT_DENSITY_GAIN_M", 18.0))
+    # PREDICTED-density bonus: a ring standing where stage 03 predicts heavy
+    # traffic is allowed to grow by up to this much on top of the entries term,
+    # so the busy junctions get the room and the quiet ones stay compact.
+    pred_gain = float(M6.pget(params, "ROUNDABOUT_PREDICTED_DENSITY_GAIN_M", 0.0))
+    pred_pow  = float(M6.pget(params, "ROUNDABOUT_PREDICTED_DENSITY_POW", 1.0))
+    dens_at   = load_density_field(params) if pred_gain > 0 else None
     nudge_max = float(M6.pget(params, "ROUNDABOUT_NUDGE_MAX_M", 200.0))
     nudge_n   = int(M6.pget(params, "ROUNDABOUT_NUDGE_PASSES", 4))
     half_w    = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))  # ring is a buffered corridor
@@ -1444,7 +1740,12 @@ def build_roundabouts(nodes: pd.DataFrame, legs: pd.DataFrame, nofly_tree,
         entries = int(np.sum(np.isin(la, mem_arr) ^ np.isin(lb, mem_arr)))
         # the ring is a BUFFERED circular corridor (half_w each side), so members
         # within R_out + half_w are already covered -> the ring can be half_w smaller
-        desired = min(max_rad, max(min_rad, spread + margin - half_w) + dens_gain * entries)
+        # predicted density at the cluster centre, 0..1 over the field's range
+        pred = dens_at(center[0], center[1]) if dens_at is not None else 0.0
+        desired = min(max_rad,
+                      max(min_rad, spread + margin - half_w)
+                      + dens_gain * entries
+                      + pred_gain * (pred ** pred_pow))
         for m in members:                                   # per-ring radius cap
             if m in rad_caps:
                 desired = min(desired, float(rad_caps[m]))
@@ -1464,6 +1765,9 @@ def build_roundabouts(nodes: pd.DataFrame, legs: pd.DataFrame, nofly_tree,
             "rbt_id": rbt_id, "center_x": float(center[0]), "center_y": float(center[1]),
             "radius_m": float(radius), "n_members": len(members), "n_entries": entries,
             "members": "+".join(sorted(members)), "cost_from": seed_member, "model_idx": smi,
+            "pred_density": round(float(pred), 4),
+            "radius_desired_m": round(float(desired), 1),
+            "radius_limited_by": ("fit" if radius < desired - 1.0 else "desired"),
         })
         for m in sorted(members):
             member_rows.append({"rbt_id": rbt_id, "node": m,
@@ -1949,53 +2253,101 @@ def main() -> None:
     # tangent to it, then the whole network is rebuilt from the moved
     # nodes (which usually turns the shifted pairs back into symmetric
     # tangent pairs).
-    if bool(M6.pget(params, "NODE_SHIFT_ENABLE", True)):
-        for _ in range(int(M6.pget(params, "NODE_SHIFT_MAX_PASSES", 2))):
-            moved = compute_node_shifts(nodes, legs, lane_report, nofly_tree, params)
-            if moved is None:
-                break
-            nodes = moved
-            n_m = int((nodes["node_shift_m"] > 0).sum())
-            print(f"Node shift      : {n_m} node circles moved with their corridors -- rebuilding network")
-            legs, lanes, lane_report = build_network(nodes)
+    # Guarantee no lane intrudes: build, repair, and if a lane still cannot be
+    # bent clear, MOVE the nodes that pin it (any node except a DB/DK objective,
+    # backups included) and build again.
+    n_shift_passes = int(M6.pget(params, "LANE_REPAIR_NODE_SHIFT_PASSES", 3))
+    unresolved: list = []
+    best = None            # (n_unresolved, snapshot) -- node shifting may make
+                           # things WORSE, so keep the best state and roll back
+    for _attempt in range(n_shift_passes + 1):
+        if bool(M6.pget(params, "NODE_SHIFT_ENABLE", True)):
+            for _ in range(int(M6.pget(params, "NODE_SHIFT_MAX_PASSES", 2))):
+                moved = compute_node_shifts(nodes, legs, lane_report, nofly_tree, params)
+                if moved is None:
+                    break
+                nodes = moved
+                n_m = int((nodes["node_shift_m"] > 0).sum())
+                print(f"Node shift      : {n_m} node circles moved with their corridors -- rebuilding network")
+                legs, lanes, lane_report = build_network(nodes)
 
-    # Roundabouts: replace high-degree junction areas with fat ring-nodes,
-    # rebuild the legs onto the rings, then clip them to the ring boundary.
-    roundabouts = pd.DataFrame()
-    nodes, roundabouts, rbt_members = build_roundabouts(nodes, legs, nofly_tree, params)
-    if len(roundabouts):
-        print(f"Roundabouts     : {len(roundabouts)} rings replace "
-              f"{len(rbt_members)} junction nodes -- rebuilding legs onto the rings")
+        # Roundabouts: replace high-degree junction areas with fat ring-nodes,
+        # rebuild the legs onto the rings, then clip them to the ring boundary.
+        roundabouts = pd.DataFrame()
+        nodes, roundabouts, rbt_members = build_roundabouts(nodes, legs, nofly_tree, params)
+        if len(roundabouts):
+            print(f"Roundabouts     : {len(roundabouts)} rings replace "
+                  f"{len(rbt_members)} junction nodes -- rebuilding legs onto the rings")
+            legs, lanes, lane_report = build_network(nodes)
+            legs, lanes, dropped = remove_legs_through_rings(legs, lanes, roundabouts)
+            if dropped:
+                print(f"  drop {len(dropped)} leg(s) crossing a ring disk (route through it): "
+                      f"{', '.join(sorted(dropped))}")
+            legs, lanes = clip_legs_to_rings(legs, lanes, roundabouts, params)
+            # Corridor <-> ring buffer separation: bend legs whose lane buffer dips
+            # into a ring buffer they do not connect to, back out to the required
+            # separation (endpoints + lane-to-lane separation preserved).
+            legs, lanes, ring_sep = separate_legs_from_ring_buffers(
+                legs, lanes, roundabouts, nofly_tree, params)
+            if len(ring_sep):
+                ring_sep.to_csv(output_dir / "ring_corridor_separation.csv", index=False)
+                n_fixed = int(ring_sep["resolved"].sum())
+                n_blocked = int((ring_sep["method"] == "endpoint_blocked").sum())
+                print(f"Ring separation : {len(ring_sep)} corridor/ring buffer conflicts "
+                      f"({n_fixed} shifted clear"
+                      f"{f', {n_blocked} endpoint-blocked' if n_blocked else ''}) "
+                      f"-> ring_corridor_separation.csv")
+                for _, r in ring_sep[~ring_sep["resolved"]].iterrows():
+                    print(f"  UNRESOLVED {r['leg_id']} vs {r['ring']}: "
+                          f"gap {r['gap_before_m']:.0f}->{r['gap_after_m']:.0f} m "
+                          f"(need {r['required_m']:.0f}; {r['method']})")
+            # Manual per-leg lateral bow (LEG_LATERAL_SHIFTS) to pull a corridor off
+            # a neighbour it runs too close to.
+            legs, lanes, lat = apply_leg_lateral_shifts(legs, lanes, nofly_tree, params)
+            for lid, off, lbl in lat:
+                print(f"Lateral shift   : {lid} bowed {off:.0f} m {lbl} into open space")
+            for _, r in roundabouts.iterrows():
+                print(f"  {r['rbt_id']}: R={r['radius_m']:.0f} m  <- {r['members']}")
+
+
+        if not bool(M6.pget(params, "LANE_REPAIR_ENABLE", True)):
+            unresolved = []
+            break
+        lanes, n_rep, wb, wa, unresolved = repair_lane_clearance(
+            lanes, nofly_tree, params, grid_m)
+        need_fp = 0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0)) \
+            + float(M6.pget(params, "LANE_CLEARANCE_MARGIN_M", 5.0))
+        tag = "" if _attempt == 0 else f" (after node shift {_attempt})"
+        if n_rep:
+            print(f"Lane repair{tag:<5}: {n_rep} lane(s) bent away from obstacles "
+                  f"(min gap {wb:.1f} m -> {wa:.1f} m; need {need_fp:.1f} m)")
+        else:
+            print(f"Lane repair{tag:<5}: no lane intruded (min gap {wb:.1f} m)")
+        snap = (nodes.copy(), legs.copy(), lanes.copy(), lane_report.copy(),
+                roundabouts.copy(), rbt_members, list(unresolved))
+        if best is None or len(unresolved) < best[0]:
+            best = (len(unresolved), snap)
+        if not unresolved or _attempt == n_shift_passes:
+            break
+        nodes, n_mv = shift_nodes_for_lane_clearance(
+            nodes, legs, unresolved, lanes, nofly_tree, params, grid_m)
+        if not n_mv:
+            break
+        print(f"  node shift    : {n_mv} node(s) moved off the pinning obstacle "
+              f"-- rebuilding ({len(unresolved)} lane(s) unresolved)")
         legs, lanes, lane_report = build_network(nodes)
-        legs, lanes, dropped = remove_legs_through_rings(legs, lanes, roundabouts)
-        if dropped:
-            print(f"  drop {len(dropped)} leg(s) crossing a ring disk (route through it): "
-                  f"{', '.join(sorted(dropped))}")
-        legs, lanes = clip_legs_to_rings(legs, lanes, roundabouts, params)
-        # Corridor <-> ring buffer separation: bend legs whose lane buffer dips
-        # into a ring buffer they do not connect to, back out to the required
-        # separation (endpoints + lane-to-lane separation preserved).
-        legs, lanes, ring_sep = separate_legs_from_ring_buffers(
-            legs, lanes, roundabouts, nofly_tree, params)
-        if len(ring_sep):
-            ring_sep.to_csv(output_dir / "ring_corridor_separation.csv", index=False)
-            n_fixed = int(ring_sep["resolved"].sum())
-            n_blocked = int((ring_sep["method"] == "endpoint_blocked").sum())
-            print(f"Ring separation : {len(ring_sep)} corridor/ring buffer conflicts "
-                  f"({n_fixed} shifted clear"
-                  f"{f', {n_blocked} endpoint-blocked' if n_blocked else ''}) "
-                  f"-> ring_corridor_separation.csv")
-            for _, r in ring_sep[~ring_sep["resolved"]].iterrows():
-                print(f"  UNRESOLVED {r['leg_id']} vs {r['ring']}: "
-                      f"gap {r['gap_before_m']:.0f}->{r['gap_after_m']:.0f} m "
-                      f"(need {r['required_m']:.0f}; {r['method']})")
-        # Manual per-leg lateral bow (LEG_LATERAL_SHIFTS) to pull a corridor off
-        # a neighbour it runs too close to.
-        legs, lanes, lat = apply_leg_lateral_shifts(legs, lanes, nofly_tree, params)
-        for lid, off, lbl in lat:
-            print(f"Lateral shift   : {lid} bowed {off:.0f} m {lbl} into open space")
-        for _, r in roundabouts.iterrows():
-            print(f"  {r['rbt_id']}: R={r['radius_m']:.0f} m  <- {r['members']}")
+
+    if best is not None and len(unresolved) > best[0]:
+        print(f"  node shift    : rolled back to the best state "
+              f"({len(unresolved)} -> {best[0]} lane(s) intruding)")
+        (nodes, legs, lanes, lane_report, roundabouts, rbt_members,
+         unresolved) = best[1]
+
+    if unresolved:
+        names = ", ".join(f"{l}/{ln}" for l, ln in unresolved[:6])
+        print(f"  [warn] {len(unresolved)} lane(s) STILL intrude after "
+              f"{n_shift_passes} node-shift pass(es): {names}"
+              + (" ..." if len(unresolved) > 6 else ""))
 
     two = int(lane_report["two_lanes"].sum())
     sep_ok = int(lane_report["separation_ok"].fillna(False).astype(bool).sum())
@@ -2045,6 +2397,54 @@ def main() -> None:
     for name in ["network_nodes.csv", "network_legs.csv", "lane_nodes.csv", "pair_routes.csv"]:
         print(f"Saved: {output_dir / name}")
     print(f"Figure: {fig_dir / '00_corridor_network.png'}")
+
+    # ---- interactive HTML: the lanes, the roundabout rings and the model nodes ----
+    if bool(M6.pget(params, "MAKE_HTML", True)):
+        try:
+            from src.route_html import render_route_html
+            xs = np.sort(df["x"].unique()); ys = np.sort(df["y"].unique())
+            gdx = float(np.median(np.diff(xs)))
+            gx0, gy0, gnx, gny = float(xs[0]), float(ys[0]), len(xs), len(ys)
+            jj = np.clip(np.rint((df["x"].to_numpy(float) - gx0) / gdx).astype(int), 0, gnx - 1)
+            ii = np.clip(np.rint((df["y"].to_numpy(float) - gy0) / gdx).astype(int), 0, gny - 1)
+            slw = np.zeros((gny, gnx), float); slw[ii, jj] = df["slowness"].to_numpy(float)
+            nofly_g = slw >= nofly_threshold
+            extent = [gx0, gx0 + gnx * gdx, gy0, gy0 + gny * gdx]
+            lab = df["label"].astype(str)
+            obj_xy = {str(r.label): (float(r.x), float(r.y))
+                      for r in df[lab.str.startswith(("DB", "DK"))].itertuples()}
+            # every lane centreline becomes a polyline; lane A = "primary"
+            html_routes = {}
+            if len(lanes):
+                for (lid, ln), g in lanes.groupby(["leg_id", "lane"]):
+                    xy = g.sort_values("seq")[["x", "y"]].to_numpy(float)
+                    if len(xy) >= 2:
+                        html_routes[f"{lid}#alt{0 if str(ln) == 'A' else 1}"] = xy
+            html_nodes = []
+            for r in nodes.itertuples():
+                nid = str(getattr(r, "net_id", getattr(r, "node_id", "")))
+                if nid.startswith(("DB", "DK")):
+                    continue
+                html_nodes.append((float(r.x), float(r.y), nid,
+                                   "RN" if nid.startswith(("RN", "BAK", "EXT")) else "TN", True))
+            html_circles = [(float(r.center_x), float(r.center_y), float(r.radius_m), str(r.rbt_id))
+                            for r in roundabouts.itertuples()] if len(roundabouts) else []
+            html_path = output_dir / "corridor_network.html"
+            render_route_html(
+                html_path, html_routes, obj_xy, nofly_g, extent, gdx,
+                float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0)),
+                0.5 * float(M6.pget(params, "CORRIDOR_DIAMETER_M", 50.0))
+                + float(M6.pget(params, "CORRIDOR_BUFFER_M", 12.5)),
+                {"title": "Corridor network + roundabouts — stage 05",
+                 "bands_default": True,
+                 "planner": "network", "diversify_k": "2 lanes",
+                 "n_routes": len(html_routes), "n_pairs": len(legs),
+                 "w_time": 0, "w_risk": 0, "w_conflict": 0},
+                nodes=html_nodes, circles=html_circles,
+                node_radius_m=0.5 * float(M6.pget(params, "NODE_CIRCLE_DIAMETER_M", 75.0)))
+            print(f"HTML  : {html_path}")
+        except Exception as _e:
+            print(f"[warn] HTML render skipped: {_e}")
     print("DONE")
     print("=" * 80)
 
