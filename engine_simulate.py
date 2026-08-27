@@ -3149,7 +3149,7 @@ _HTML_TEMPLATE = r"""<!DOCTYPE html>
         </label>
         <label class="sp"><input type="checkbox" id="cmtoggle" checked> costmap</label>
         <label class="sp"><input type="checkbox" id="linktoggle" checked> interactions</label>
-        <label class="sp"><input type="checkbox" id="idtoggle"> agent id</label>
+        <label class="sp"><input type="checkbox" id="idtoggle" checked> agent id</label>
       </div>
       <div class="controls"><input type="range" id="scrub" min="0" value="0" step="1"></div>
     </div>
@@ -3236,7 +3236,8 @@ function buildCostmap(){
 buildCostmap();
 let showCostmap = !!DATA.costmap;
 let showLinks = true;     // draw inter-agent reference links (same-level proximity)
-let showIds = false;      // agent index labels: off by default, decluttered when on
+let showIds = true;       // agent index labels ON by default; the declutter below
+                          // keeps them readable even with 150 airborne
 
 function drawNetwork(){
   ctx.clearRect(0,0,W,H);
