@@ -489,6 +489,16 @@ done
 **Report medians and spread, not single runs**, and re-check the headline claims
 against them.
 
+### Comparison against the legacy planners
+
+The ACO / PSO / k-means generation is kept in the repo precisely for this — see
+*Legacy* in [PIPELINE.md](PIPELINE.md). Comparing the current pipeline against a
+**different family of methods**, rather than only against its own earlier
+parameters, is a stronger result than any sweep: metaheuristic vs deterministic
+planning, and k-means vs the density field for picking traffic nodes.
+`output/legacy/` holds the pre-fork numbers, including
+`compare_fmm_vs_theta.html`.
+
 ### Load and capacity sweeps
 
 | sweep | knob | what it answers |

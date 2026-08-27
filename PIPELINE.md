@@ -119,9 +119,21 @@ differently, so the density field differs, so the traffic nodes differ, so the
 corridor network and the simulated traffic differ. One run gave branch (a)
 40 TN + 11 RN against branch (b) 15 TN + 13 RN.
 
-## Legacy (in neither branch)
+## Legacy — kept deliberately, as comparison baselines
 
-`02_run_theta_plan.py`, `03_cluster_theta_routes.py`,
-`04_run_master_plan_ACO_legacy.py`, and in `src/`: `kmean.py`, `PSO.py`,
-`ACO.py`, `routeplan_PSO_ACO.py`, `output_io.py` — superseded, imported by
-nothing in the branches above.
+No active stage imports any of these, but **do not delete them**. They are the
+earlier generation of the study, retained so the current pipeline can be
+measured against a genuinely different approach rather than only against its own
+earlier parameters.
+
+| file | what it is | what it is a baseline for |
+|---|---|---|
+| `02_run_theta_plan.py` | the original node-based Theta* master planner (v15) | the pre-fork route plan, before stages 02/04 split into launcher + engine |
+| `03_cluster_theta_routes.py` | DBSCAN clustering of route hits | the current density-field route to traffic nodes in stage 03 |
+| `src/kmean.py` | k-means route-hit density | same — a different clustering family for picking TN/RN |
+| `04_run_master_plan_ACO_legacy.py`, `src/ACO.py`, `src/PSO.py`, `src/routeplan_PSO_ACO.py` | ant-colony and particle-swarm master-route planning | **the most valuable of the set**: metaheuristic planners against the deterministic FMM / Theta* the branches use now. A different family, not a different tuning. |
+| `src/output_io.py` | the pre-fork CSV writer | reading the legacy outputs below |
+| `output/legacy/` | 202 files: `02_route_plan`, `03_route_density`, `04_master_corridor_plan_FMM`, `05_master_corridor_theta`, and `compare_fmm_vs_theta.html` | the actual pre-fork numbers to compare against |
+
+They also pin two dependencies (`scikit-learn`, `tqdm`) that nothing else needs —
+see the README. That is the price of keeping them, and it is intentional.

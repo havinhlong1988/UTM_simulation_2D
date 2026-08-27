@@ -45,9 +45,20 @@ pip install shapely pillow pyvista
 
 ### Legacy only
 
-`scikit-learn` and `tqdm` are needed only by the superseded scripts listed in
-[PIPELINE.md](PIPELINE.md) (`02_run_theta_plan.py`, `03_cluster_theta_routes.py`,
-`04_run_master_plan_ACO_legacy.py`). No active stage imports them.
+```bash
+pip install scikit-learn tqdm
+```
+
+`scikit-learn` and `tqdm` are needed only by the legacy scripts
+(`02_run_theta_plan.py`, `03_cluster_theta_routes.py`,
+`04_run_master_plan_ACO_legacy.py` and the `src/` modules they use). **No active
+stage imports them**, so skip these unless you intend to run the legacy
+planners.
+
+Those scripts are kept on purpose — they are the ACO / PSO / k-means generation
+of the study, retained as **comparison baselines** so the current pipeline can be
+measured against a different family of methods, not just against its own earlier
+parameters. See [PIPELINE.md](PIPELINE.md#legacy--kept-deliberately-as-comparison-baselines).
 
 ### Verify the install
 
