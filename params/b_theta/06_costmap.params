@@ -1,0 +1,84 @@
+# ======================================================================
+# branch b_theta -- stage 06: SLOWNESS cost-map  (engine_costmap.py v2)
+# ======================================================================
+# The map does not move the corridors; it prices them. Four layers, each
+# assessed on the stage-05 network and blended into one composite risk:
+#
+#   (1) econ    -- cân bằng kinh tế: value of serving an area (DB/DK demand
+#                  + expected corridor throughput) vs the cost of serving it
+#                  (deadhead energy from the nearest base + distance from the
+#                  built network), plus an equity penalty on saturated cores
+#   (2) air     -- an toàn vận hành trên không: expected encounter density,
+#                  roundabout/junction merge hotspots, RA infringement margin
+#   (3) ground  -- an toàn mặt đất: built-up exposure under the corridor,
+#                  discounted by sheltering, spread over the crash footprint,
+#                  inflated where no FLZ is within reach
+#   (4) traffic -- measured pass-1 trajectory density (optional; the layer is
+#                  dropped automatically when no trajectories.csv exists)
+#
+#   slowness = MAX - risk*(MAX-MIN)   inside the corridors
+#            = OUTSIDE_SLOWNESS       everywhere else
+# ----------------------------------------------------------------------
+
+# Stage-01 riskmap: obstacle / RA / no-fly / FLZ layers for (2) and (3).
+RISK_XYZ = "output/01_random_node_map/random_2d_node_riskmap_seed2298177982.xyz"
+
+# ---- grid + slowness range -------------------------------------------
+RES_M                  = 40.0    # cost-map cell size
+SMOOTH_SIGMA_M         = 150.0   # Gaussian smoothing of the density layers
+MIN_SLOWNESS           = 0.01    # slowest a corridor cell may get
+MAX_SLOWNESS           = 1.00    # full speed
+CORRIDOR_HALF_WIDTH_M  = 60.0    # cells this close to a lane are "in network"
+OUTSIDE_SLOWNESS       = 0.01    # crawl outside the network
+RING_INTERIOR_SLOWNESS = None    # None -> same as OUTSIDE_SLOWNESS
+# Stage 05 now sizes roundabouts from predicted density (77-126 m here) and
+# stage 07 flies them as 2-D ORCA manoeuvring AREAS, so the whole ring disc is
+# usable corridor -- price it as such. Only the kept-clear island at the centre
+# stays non-lane. Leave False and the disc is priced as off-corridor, which
+# would crawl every agent using the area the ring was widened to provide.
+RING_AS_AREA      = True
+RING_ISLAND_FRAC  = 0.35         # must match ORCA_ISLAND_FRAC in stage 07
+
+# ---- layer blend (a weight of 0 drops the layer) ----------------------
+W_ECON    = 1.0
+W_AIR     = 1.5
+W_GROUND  = 1.5
+W_TRAFFIC = 1.0                  # only used when a pass-1 sim exists
+NORMALISE_ON = "network"         # "network" = stretch the composite over its
+                                 #   in-corridor range (full speed band for the
+                                 #   sim); "flyable" = whole-map scaling
+
+# ---- (1) economic balance --------------------------------------------
+ECON_DEMAND_RADIUS_M  = 700.0    # decay length of a service-demand kernel
+ECON_DB_WEIGHT        = 1.0      # a drone base radiates this much demand
+ECON_DK_WEIGHT        = 0.6      # a docking station this much
+ECON_VALUE_NODE_W     = 1.0      # weight of the node demand in V
+ECON_VALUE_FLOW_W     = 1.0      # weight of the corridor throughput in V
+ECON_ENERGY_RADIUS_M  = 1500.0   # deadhead energy decay from the nearest DB
+ECON_INFRA_RADIUS_M   = 400.0    # cost of being far from built infrastructure
+ECON_COST_ENERGY_W    = 1.0
+ECON_COST_INFRA_W     = 1.0
+ECON_EQUITY_W         = 0.35     # 0 = pure value/cost balance, 1 = pure equity
+ECON_SATURATION_Q     = 0.75     # V above this quantile counts as saturated
+
+# ---- (2) air operational safety --------------------------------------
+AIR_FLOW_W            = 1.0      # encounter density from the expected flow
+AIR_JUNCTION_W        = 1.0      # merge/junction hotspots
+AIR_RA_W              = 0.8      # restricted-airspace infringement
+AIR_JUNCTION_SIGMA_M  = 180.0    # decay length of a junction hotspot
+AIR_RA_BUFFER_M       = 250.0    # decay length of the RA proximity term
+
+# ---- (3) ground safety -----------------------------------------------
+GROUND_EXPOSURE_SIGMA_M = 150.0  # smoothing of the built-up/obstacle proxy
+GROUND_APRON_W          = 0.6    # ground people/assets at the DB/DK aprons
+GROUND_APRON_RADIUS_M   = 250.0
+GROUND_SHELTER_FACTOR   = 0.35   # fraction of exposure shielded by structures
+GROUND_IMPACT_RADIUS_M  = 120.0  # ballistic/glide lateral footprint
+GROUND_FLZ_REACH_M      = 900.0  # emergency-landing reach; beyond it, no relief
+GROUND_FLZ_W            = 1.0    # how much an unreachable FLZ inflates the risk
+
+# ---- (4) measured traffic --------------------------------------------
+HOLD_WEIGHT = 3.0                # extra weight for holding (jammed) samples
+
+MAKE_FIGURES = True    # slowness_costmap.png + cost_layers.png
+MAKE_HTML    = True    # costmap.html: swap component maps, toggle model nodes
