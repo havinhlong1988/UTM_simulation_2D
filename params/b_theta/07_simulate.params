@@ -210,6 +210,21 @@ MIN_DEST_IDLE_S = 1800.0      # 30 minutes parked at the dock (charging)
 # arrivals ever had to wait, which should stay near zero if the plan holds.
 DOCK_CAPACITY      = 5        # drones that can be parked at one dock at once
 DOCK_PARK_BUFFER_S = 600.0    # 10 min of pad time on top of the charging stop
+# LIVE pad reservations. The CTOT scheduler books a pad once, before launch,
+# from a predicted arrival -- and over a long schedule that prediction drifts
+# (holds, cost-map slow-downs, ORCA detours). Once the pads run at 100% any
+# drift becomes a booking conflict. So the reservation is RE-PLANNED in flight:
+# every RESERVATION_UPDATE_S the remaining route is re-priced through the
+# cost-map and, if the arrival has moved by more than the tolerance, the pad is
+# re-booked. A drone may only land on a pad it holds a STARTED reservation for,
+# so capacity is guaranteed by the booking instead of checked on arrival, and a
+# drone that has lost its slot learns en route rather than over a full dock.
+RESERVATION_UPDATE_S    = 60.0    # how often a drone re-prices its arrival
+RESERVATION_TOLERANCE_S = 120.0   # drift this large triggers a re-booking
+# If the earliest free pad is more than this beyond a drone's predicted arrival,
+# it is not launched at all -- holding it on the ground beats sending it up to
+# hover over a dock that will still be full when it gets there.
+PAD_LAUNCH_SLIP_S       = 300.0
 
 # Deconfliction -------------------------------------------------------
 # FLOW_MODE controls lane occupancy:

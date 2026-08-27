@@ -592,6 +592,7 @@ class Agent:
                  "outbound_upto", "seg_idx", "s_local", "dwell_left", "status",
                  "dist_m", "air_s", "hold_s", "n_holds", "holding", "was_holding",
                  "launch_t", "complete_t", "route_len", "held_node",
+                 "pad_t0", "pad_t1", "pad_booked",
                  "speed", "speed_kmh", "is_patrol", "laps", "stuck_s", "n_reroutes",
                  "cont_frac", "battery_wh", "charge_s", "n_charges", "is_priority",
                  "sched_t", "orca_xy", "orca_v")
@@ -638,6 +639,9 @@ class Agent:
         self.launch_t = None
         self.complete_t = None
         self.held_node = None       # network node currently reserved for transit
+        self.pad_t0 = None          # dock pad reservation: window start (s)
+        self.pad_t1 = None          # ... and end; None = no reservation held
+        self.pad_booked = False
         self.sched_t = None         # CTOT from the departure scheduler (None = unscheduled)
         # free 2-D state, live ONLY while the agent is inside a roundabout's ORCA
         # zone. Everywhere else the agent is a 1-D point on a lane centreline.
@@ -827,6 +831,77 @@ def build_fleet(net: Network, params, rng: np.random.Generator):
 # ======================================================================
 # Simulation
 # ======================================================================
+class PadBook:
+    """Live dock-pad reservations, re-planned from the drone's ACTUAL progress.
+
+    The CTOT scheduler books a pad once, before the mission launches, from a
+    predicted arrival. Over a 15 h schedule that prediction drifts -- holds,
+    cost-map slow-downs, ORCA detours -- and once the pads run at 100% any
+    drift becomes a booking conflict, which is why the static plan degraded
+    from 0 reactive dock-full holds at 100 agents to 3353 at 1000.
+
+    This keeps the reservations honest while the drone is in the air: every
+    RESERVATION_UPDATE_S the remaining route is re-priced through the cost-map
+    and, if the arrival has moved by more than the tolerance, the pad is
+    re-booked. A drone may only land on a pad it holds a STARTED reservation
+    for, so the capacity is guaranteed by construction rather than checked on
+    arrival, and a drone that has lost its slot learns about it EN ROUTE
+    instead of on top of a full dock."""
+
+    def __init__(self, capacity: int, hold_s: float):
+        self.cap = int(capacity)
+        self.hold = float(hold_s)
+        self.res: dict = defaultdict(dict)      # dock -> {aid: (t0, t1)}
+        self.n_book = 0
+        self.n_rebook = 0
+        self.n_update = 0
+        self.drift_s = 0.0
+
+    def _earliest(self, dock: str, t_from: float, skip_aid=None) -> float:
+        """Earliest start >= t_from with a free pad for the whole hold window.
+        Only reservation START times can become free slots, so scanning the
+        existing starts is exact, not a discretisation."""
+        if self.cap <= 0:
+            return t_from
+        windows = [(t0, t1) for aid, (t0, t1) in self.res[dock].items()
+                   if aid != skip_aid]
+        cand = t_from
+        for _ in range(len(windows) + 1):
+            overlap = [(t0, t1) for (t0, t1) in windows
+                       if t0 < cand + self.hold and t1 > cand]
+            if len(overlap) < self.cap:
+                return cand
+            cand = min(t1 for (_t0, t1) in overlap)   # wait for the first to free
+        return cand
+
+    def book(self, agent, dock: str, earliest: float) -> float:
+        t0 = self._earliest(dock, earliest, skip_aid=agent.aid)
+        self.res[dock][agent.aid] = (t0, t0 + self.hold)
+        agent.pad_t0, agent.pad_t1, agent.pad_booked = t0, t0 + self.hold, True
+        self.n_book += 1
+        return t0
+
+    def rebook(self, agent, dock: str, earliest: float) -> float:
+        self.n_update += 1
+        old = agent.pad_t0
+        t0 = self._earliest(dock, earliest, skip_aid=agent.aid)
+        if old is not None:
+            self.drift_s += abs(t0 - old)
+            if abs(t0 - old) > 1e-6:
+                self.n_rebook += 1
+        self.res[dock][agent.aid] = (t0, t0 + self.hold)
+        agent.pad_t0, agent.pad_t1 = t0, t0 + self.hold
+        return t0
+
+    def release(self, agent, dock: str):
+        self.res[dock].pop(agent.aid, None)
+        agent.pad_t0 = agent.pad_t1 = None
+        agent.pad_booked = False
+
+    def peak(self, dock: str, t: float) -> int:
+        return sum(1 for (t0, t1) in self.res[dock].values() if t0 <= t < t1)
+
+
 def route_time_factor(segs, slowness_at=None, sample_m: float = 100.0) -> float:
     """Metre-seconds per (metre / (m/s)) along a route -- i.e. how much longer
     the route takes than length/cruise would suggest.
@@ -1621,6 +1696,40 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     dock_now: dict = defaultdict(int)          # dock -> drones parked right now
     dock_peak: dict = defaultdict(int)
     dock_full_holds = 0
+    dock_hold_s = float(pget(params, "DOCK_PARK_BUFFER_S", 600.0)) + min_dest_idle
+    padbook = PadBook(dock_cap_rt, dock_hold_s) if dock_cap_rt else None
+    res_update_s = float(pget(params, "RESERVATION_UPDATE_S", 60.0))
+    res_tol_s = float(pget(params, "RESERVATION_TOLERANCE_S", 120.0))
+    next_res_update = 0.0
+    n_launch_deferred_pad = 0
+    pad_launch_slip = float(pget(params, "PAD_LAUNCH_SLIP_S", 300.0))
+    deferred_aids: set = set()
+
+    def _live_eta(a) -> float:
+        """Seconds from now to the destination dock, from where the drone
+        ACTUALLY is: the remaining outbound legs, re-priced through the
+        cost-map (true velocity = slowness * cruise)."""
+        v = max(a.speed, 1e-3)
+        upto = a.outbound_upto if a.round_trip else len(a.segs)
+        total = 0.0
+        for k in range(max(a.seg_idx, 0), min(upto, len(a.segs))):
+            sg = a.segs[k]
+            if sg is None or a.kinds[k] != "leg":
+                continue
+            L = float(sg.length) - (a.s_local if k == a.seg_idx else 0.0)
+            if L <= 0:
+                continue
+            if cost_map is None:
+                total += L / v
+                continue
+            n = max(2, int(L / 150.0) + 1)
+            s0 = (a.s_local if k == a.seg_idx else 0.0)
+            inv = 0.0
+            for x in np.linspace(s0, float(sg.length), n):
+                px, py = interp_xy(sg.xy, sg.cs, float(x))
+                inv += 1.0 / min(max(slowness_at(px, py), 0.05), 1.0)
+            total += (L / v) * (inv / n)
+        return total
 
     conflict_pts_all: list = []        # every conflict location (red stars)
     total_conflict_samples = 0
@@ -1738,8 +1847,26 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                     continue
                 if not a.is_patrol and not plan_mission(a):
                     continue                       # unreachable: drop (shouldn't happen)
+                # a mission that parks needs a pad it can actually land on.
+                # Book it from the LIVE route now that the route is planned; if
+                # the earliest pad is far beyond its arrival the drone would
+                # only hover over a full dock, so hold it on the ground instead
+                # -- rescheduling driven by the live pad state, not the plan.
+                wants_pad = (padbook is not None and a.round_trip
+                             and not a.is_patrol)
+                eta0 = 0.0
+                if wants_pad:
+                    eta0 = _live_eta(a)
+                    t0 = padbook._earliest(a.dest, t + eta0, skip_aid=a.aid)
+                    if t0 - (t + eta0) > pad_launch_slip:
+                        requeue.append(a)
+                        n_launch_deferred_pad += 1
+                        deferred_aids.add(a.aid)
+                        continue
                 if enter_leg(a, 0):
                     a.depart_t = t
+                    if wants_pad:                  # book only once airborne
+                        padbook.book(a, a.dest, t + eta0)
                     active_agents.append(a); n_active += 1; moved = True
                     launched += 1; last_launch_t = t
                     if dcb_mode:
@@ -1977,7 +2104,22 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                         release_node(a)
                     a.status = "done"; a.complete_t = t; moved = True
                 elif a.kinds[nxt] == "dwell":
-                    if dock_cap_rt and dock_now[a.dest] >= dock_cap_rt:
+                    # PHYSICAL occupancy is the authority for landing: a pad
+                    # that is empty now is usable now, even if someone still
+                    # 20 minutes out holds a reservation for it. Making the
+                    # reservation itself the gate was over-conservative -- it
+                    # left drones holding over demonstrably empty pads. The
+                    # reservations shape LAUNCH decisions and give warning en
+                    # route; they do not ration a pad that is already free.
+                    if padbook is not None:
+                        if dock_now[a.dest] >= dock_cap_rt:
+                            a.holding = True
+                            dock_full_holds += 1
+                            if not a.is_patrol:
+                                hold_cause["block"] += 1
+                            continue
+                        padbook.book(a, a.dest, t)     # sync the books to reality
+                    elif dock_cap_rt and dock_now[a.dest] >= dock_cap_rt:
                         a.holding = True           # dock full: wait on the leg
                         dock_full_holds += 1
                         if not a.is_patrol:
@@ -2021,8 +2163,26 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                         and enter_leg(a, a.seg_idx + 1):
                     if dock_cap_rt:
                         dock_now[a.dest] = max(0, dock_now[a.dest] - 1)
+                    if padbook is not None:
+                        padbook.release(a, a.dest)     # pad free for the next drone
                     n_air_now += 1
                     moved = True
+
+        # ---- re-plan the pad reservations from where the drones ACTUALLY are ----
+        # A prediction made at launch drifts over a 15 h schedule. Re-pricing the
+        # remaining route keeps every reservation honest, so a drone that has
+        # lost its slot finds out en route -- and the pads it no longer needs go
+        # back to the pool for someone else.
+        if padbook is not None and t >= next_res_update:
+            next_res_update = t + res_update_s
+            for a in active_agents:
+                if a.is_patrol or not a.pad_booked or a.status == "dwell":
+                    continue
+                if a.seg_idx >= a.outbound_upto:      # already past the dock
+                    continue
+                want = t + _live_eta(a)
+                if a.pad_t0 is None or abs(want - a.pad_t0) > res_tol_s:
+                    padbook.rebook(a, a.dest, want)
 
         # arrived-but-not-launched deliveries are blocked on the launch queue
         hold_cause["launch_queue"] += n_waiting
@@ -2211,6 +2371,14 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         "dock_capacity": dock_cap_rt,
         "dock_peak_per_dock": dict(dock_peak),
         "dock_full_holds": dock_full_holds,
+        "pad_reservation": ({
+            "updates": padbook.n_update, "rebookings": padbook.n_rebook,
+            "initial_bookings": padbook.n_book,
+            "mean_drift_s": round(padbook.drift_s / max(padbook.n_update, 1), 1),
+            "launch_deferral_events": n_launch_deferred_pad,
+            "missions_deferred_for_pad": len(deferred_aids),
+            "update_period_s": res_update_s, "tolerance_s": res_tol_s,
+        } if padbook is not None else None),
         "hold_cause": dict(hold_cause),
         "schedule_mode": schedule_mode,
         "orca_rings": orca_rings,
@@ -3979,6 +4147,14 @@ def main() -> None:
     if stats["dock_capacity"]:
         _pk = stats["dock_peak_per_dock"]
         _over = {k: v for k, v in _pk.items() if v > stats["dock_capacity"]}
+        _pr = stats.get("pad_reservation")
+        if _pr:
+            print(f"Pad booking   : live re-plan every {_pr['update_period_s']:.0f} s "
+                  f"(tolerance {_pr['tolerance_s']:.0f} s) -- {_pr['initial_bookings']} "
+                  f"pads booked, {_pr['updates']} re-planned of which "
+                  f"{_pr['rebookings']} moved (mean shift {_pr['mean_drift_s']/60:.1f} min); "
+                  f"{_pr['missions_deferred_for_pad']} missions held on the ground "
+                  f"for want of a pad ({_pr['launch_deferral_events']} retries)")
         print(f"Dock capacity : {stats['dock_capacity']} pads/dock; peak use "
               + ", ".join(f"{k} {v}" for k, v in sorted(_pk.items()))
               + f"  -> {'OK, none over capacity' if not _over else 'OVER: ' + str(_over)}"
@@ -4195,6 +4371,7 @@ def main() -> None:
             "capacity_per_dock": int(stats["dock_capacity"]),
             "peak_per_dock": stats["dock_peak_per_dock"],
             "dock_full_holds": int(stats["dock_full_holds"]),
+            "pad_reservation": stats["pad_reservation"],
             "capacity_respected": bool(
                 stats["dock_capacity"] == 0
                 or all(v <= stats["dock_capacity"]
