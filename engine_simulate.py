@@ -593,6 +593,7 @@ class Agent:
                  "dist_m", "air_s", "hold_s", "n_holds", "holding", "was_holding",
                  "launch_t", "complete_t", "route_len", "held_node",
                  "pad_t0", "pad_t1", "pad_booked",
+                 "energy_req_wh", "energy_short", "speed_promoted",
                  "speed", "speed_kmh", "is_patrol", "laps", "stuck_s", "n_reroutes",
                  "cont_frac", "battery_wh", "charge_s", "n_charges", "is_priority",
                  "sched_t", "orca_xy", "orca_v")
@@ -642,6 +643,9 @@ class Agent:
         self.pad_t0 = None          # dock pad reservation: window start (s)
         self.pad_t1 = None          # ... and end; None = no reservation held
         self.pad_booked = False
+        self.energy_req_wh = 0.0    # predicted Wh for the binding leg
+        self.energy_short = False   # in flight: will not make it on what is left
+        self.speed_promoted = False # class raised by the energy check
         self.sched_t = None         # CTOT from the departure scheduler (None = unscheduled)
         # free 2-D state, live ONLY while the agent is inside a roundabout's ORCA
         # zone. Everywhere else the agent is a 1-D point on a lane centreline.
@@ -902,6 +906,51 @@ class PadBook:
         return sum(1 for (t0, t1) in self.res[dock].values() if t0 <= t < t1)
 
 
+def route_energy_wh(segs, v_cruise: float, p0: float, cd: float,
+                    slowness_at=None, sample_m: float = 100.0,
+                    s_from: float = 0.0, first_idx: int = 0) -> float:
+    """Energy (Wh) to fly `segs` at `v_cruise`, priced through the cost-map.
+
+    The multirotor power curve is P(v) = p0 + cd*v^3, and the cost-map makes the
+    true velocity v*slowness, so a metre of route costs
+
+        dE/dL = P(v*s) / (v*s) = p0/(v*s) + cd*(v*s)^2
+
+    The hover floor is DIVIDED by the speed, so flying slower costs MORE energy
+    per metre, not less -- and a slow drone in slow airspace pays twice. That
+    term is why the 30 km/h class is the one that runs flat on the long routes:
+    energy per metre is minimised at v = (p0/(2*cd))^(1/3), about 47 km/h here,
+    and 30 km/h sits well below it.
+
+    `s_from`/`first_idx` let this be re-evaluated from where a drone actually
+    is, for the in-flight check."""
+    v = max(float(v_cruise), 1e-3)
+    total = 0.0
+    for k, sg in enumerate(segs):
+        if sg is None:
+            continue
+        L = float(sg.length)
+        start = s_from if k == first_idx else 0.0
+        if k < first_idx or L - start <= 0:
+            continue
+        n = max(2, int((L - start) / sample_m) + 1)
+        acc = 0.0
+        for x in np.linspace(start, L, n):
+            sl = 1.0
+            if slowness_at is not None:
+                px, py = interp_xy(sg.xy, sg.cs, float(x))
+                sl = min(max(slowness_at(px, py), 0.05), 1.0)
+            ve = v * sl
+            acc += p0 / ve + cd * ve * ve
+        total += (L - start) * (acc / n)
+    return total / 3600.0
+
+
+def energy_optimal_speed(p0: float, cd: float) -> float:
+    """Cruise speed (m/s) minimising energy per metre: d/dv [p0/v + cd*v^2] = 0."""
+    return float((p0 / (2.0 * max(cd, 1e-12))) ** (1.0 / 3.0))
+
+
 def route_time_factor(segs, slowness_at=None, sample_m: float = 100.0) -> float:
     """Metre-seconds per (metre / (m/s)) along a route -- i.e. how much longer
     the route takes than length/cruise would suggest.
@@ -1013,6 +1062,21 @@ def schedule_departures(net: Network, agents: list[Agent], params,
     n_dock_pushed = 0
     dock_push_s = 0.0
     eta_sum = 0.0
+    # ---- energy feasibility ----
+    # A mission is only cleared if the battery can actually fly it. Energy per
+    # metre is p0/(v*s) + cd*(v*s)^2, so the hover floor is divided by speed:
+    # the SLOW classes are the expensive ones on long routes, and they are the
+    # ones that run flat. Candidate classes are therefore tried cheapest-energy
+    # first, which generally means raising the speed, not lowering it.
+    e_p0, e_cd, e_bat = energy_params(params)
+    e_reserve = float(pget(params, "ENERGY_RESERVE_PCT", 0.20))
+    e_hold_allow = float(pget(params, "ENERGY_HOLD_ALLOWANCE_PCT", 0.25))
+    e_usable = e_bat / (1.0 + e_reserve)
+    _classes = [float(k) for k in pget(params, "SPEED_CLASSES_KMH", [60.0, 50.0, 30.0])]
+    # order by energy per metre at that class -- cheapest first
+    _classes.sort(key=lambda k: e_p0 / (k / 3.6) + e_cd * (k / 3.6) ** 2)
+    n_promoted = 0
+    n_infeasible = 0
     rows: list = []                     # the schedule itself, for audit + plotting
     dock_series: dict = {d: None for d in occ_dock}
 
@@ -1035,8 +1099,22 @@ def schedule_departures(net: Network, agents: list[Agent], params,
                 segs = net.route_segs(pr[0])
                 got = (segs[0].res if segs else f"__origin__{a.origin}",
                        float(sum(sg.length for sg in segs)),
-                       route_time_factor(segs, slowness_at))
+                       route_time_factor(segs, slowness_at), segs)
             _route_cache[key] = got
+        return got
+
+    _energy_cache: dict = {}
+
+    def _energy_need(a, segs, kmh):
+        """Wh for the binding leg at `kmh`, with an allowance for holding.
+        A round trip recharges to full at the dock, so the requirement is ONE
+        leg, not the sum of both."""
+        key = (a.origin, a.dest, round(kmh, 3))
+        got = _energy_cache.get(key)
+        if got is None:
+            got = route_energy_wh(segs, kmh / 3.6, e_p0, e_cd, slowness_at) \
+                * (1.0 + e_hold_allow)
+            _energy_cache[key] = got
         return got
 
     def _earliest_free(arr, b0, cap):
@@ -1051,7 +1129,22 @@ def schedule_departures(net: Network, agents: list[Agent], params,
     n_delayed = 0
     total_delay = 0.0
     for a in sorted(dely, key=lambda x: (x.arrival_t, x.priority)):
-        res, route_len, tfac = _nominal(a)
+        res, route_len, tfac, segs = _nominal(a)
+        # ---- energy gate: can this drone actually fly this leg? ----
+        need = _energy_need(a, segs, a.speed_kmh) if segs else 0.0
+        if segs and need > e_usable:
+            for kmh in _classes:                    # cheapest-energy class first
+                cand = _energy_need(a, segs, kmh)
+                if cand <= e_usable:
+                    a.speed_kmh = kmh
+                    a.speed = kmh / 3.6
+                    a.speed_promoted = True
+                    need = cand
+                    n_promoted += 1
+                    break
+            else:
+                n_infeasible += 1        # not flyable on one battery at any class
+        a.energy_req_wh = need
         v = max(a.speed, 1e-3)
         # (1) corridor headway
         t0 = max(float(a.arrival_t), last_dep.get(res, -1e18) + headway)
@@ -1117,6 +1210,9 @@ def schedule_departures(net: Network, agents: list[Agent], params,
             "route_len_m": round(route_len, 1),
             "eta_s": round((route_len / v) * tfac, 1),
             "slowness_factor": round(tfac, 3),
+            "energy_req_wh": round(need, 1),
+            "energy_margin_pct": round(100.0 * (1.0 - need / max(e_bat, 1e-9)), 1),
+            "speed_promoted": bool(a.speed_promoted),
             "dock_hold_s": round(dock_hold, 1) if parks else 0.0,
         })
         if t > a.arrival_t + 1e-9:
@@ -1132,6 +1228,17 @@ def schedule_departures(net: Network, agents: list[Agent], params,
         "dock_hold_s": dock_hold,
         "n_parking_missions": n_park,
         "mean_eta_to_dock_s": round(eta_sum / max(n_park, 1), 1),
+        "energy": {
+            "battery_wh": e_bat, "reserve_pct": e_reserve,
+            "hold_allowance_pct": e_hold_allow, "usable_wh": round(e_usable, 1),
+            "optimal_cruise_kmh": round(3.6 * energy_optimal_speed(e_p0, e_cd), 1),
+            "n_speed_promoted": n_promoted,
+            "n_infeasible_any_class": n_infeasible,
+            "mean_required_wh": round(
+                sum(r["energy_req_wh"] for r in rows) / max(len(rows), 1), 1),
+            "max_required_wh": round(max((r["energy_req_wh"] for r in rows),
+                                         default=0.0), 1),
+        },
         "n_pushed_for_dock": n_dock_pushed,
         "mean_dock_push_s": round(dock_push_s / max(n_dock_pushed, 1), 1),
         "rows": rows,
@@ -1704,6 +1811,19 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     n_launch_deferred_pad = 0
     pad_launch_slip = float(pget(params, "PAD_LAUNCH_SLIP_S", 300.0))
     deferred_aids: set = set()
+    e_reserve_rt = float(pget(params, "ENERGY_RESERVE_PCT", 0.20))
+    n_energy_short = 0
+    energy_short_aids: set = set()
+    n_launch_held_energy = 0
+
+    def _energy_left_needed(a) -> float:
+        """Wh still required to reach the destination dock from where the drone
+        is now, priced through the cost-map at its actual cruise class."""
+        upto = a.outbound_upto if a.round_trip else len(a.segs)
+        if a.seg_idx >= upto:
+            return 0.0
+        return route_energy_wh(a.segs[:upto], a.speed, e_p0, e_cd, slowness_at,
+                               s_from=a.s_local, first_idx=max(a.seg_idx, 0))
 
     def _live_eta(a) -> float:
         """Seconds from now to the destination dock, from where the drone
@@ -1852,6 +1972,13 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                 # the earliest pad is far beyond its arrival the drone would
                 # only hover over a full dock, so hold it on the ground instead
                 # -- rescheduling driven by the live pad state, not the plan.
+                # never launch into a leg the battery cannot finish -- the
+                # scheduler already raised the speed class where that helped,
+                # so anything caught here waits on the pad and charges
+                if not a.is_patrol and a.energy_req_wh > 0.0 \
+                        and a.battery_wh < a.energy_req_wh:
+                    requeue.append(a); n_launch_held_energy += 1
+                    continue
                 wants_pad = (padbook is not None and a.round_trip
                              and not a.is_patrol)
                 eta0 = 0.0
@@ -2181,7 +2308,20 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                 if a.seg_idx >= a.outbound_upto:      # already past the dock
                     continue
                 want = t + _live_eta(a)
-                if a.pad_t0 is None or abs(want - a.pad_t0) > res_tol_s:
+                # ENERGY: will it still reach the dock on what is left? Priced
+                # from the drone's real position and remaining charge, so a
+                # slow-down or a detour that eats the margin shows up here
+                # rather than as a dead battery. A drone that is short is given
+                # the EARLIEST pad available -- it needs to land and charge, and
+                # making it wait for a tidier slot is what kills it.
+                short = a.battery_wh < _energy_left_needed(a) * (1.0 + e_reserve_rt)
+                if short and not a.energy_short:
+                    a.energy_short = True
+                    n_energy_short += 1
+                    energy_short_aids.add(a.aid)
+                if short:
+                    padbook.rebook(a, a.dest, t)
+                elif a.pad_t0 is None or abs(want - a.pad_t0) > res_tol_s:
                     padbook.rebook(a, a.dest, want)
 
         # arrived-but-not-launched deliveries are blocked on the launch queue
@@ -2376,6 +2516,8 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             "initial_bookings": padbook.n_book,
             "mean_drift_s": round(padbook.drift_s / max(padbook.n_update, 1), 1),
             "launch_deferral_events": n_launch_deferred_pad,
+            "energy_short_in_flight": len(energy_short_aids),
+            "launches_held_low_battery": n_launch_held_energy,
             "missions_deferred_for_pad": len(deferred_aids),
             "update_period_s": res_update_s, "tolerance_s": res_tol_s,
         } if padbook is not None else None),
@@ -4038,6 +4180,17 @@ def main() -> None:
               f"{sched_info['origin_cap']}; {sched_info['n_delayed']} missions "
               f"delayed (mean {sched_info['mean_delay_s']/60.0:.1f} min), "
               f"last CTOT {sched_info['span_h']:.2f} h")
+        _en = sched_info.get("energy")
+        if _en:
+            print(f"Energy gate   : battery {_en['battery_wh']:.0f} Wh, "
+                  f"{_en['reserve_pct']*100:.0f}% reserve + "
+                  f"{_en['hold_allowance_pct']*100:.0f}% hold allowance -> "
+                  f"{_en['usable_wh']:.0f} Wh usable; need mean "
+                  f"{_en['mean_required_wh']:.0f} / max {_en['max_required_wh']:.0f} Wh; "
+                  f"energy-optimal cruise {_en['optimal_cruise_kmh']:.0f} km/h -> "
+                  f"{_en['n_speed_promoted']} missions had their speed class raised"
+                  + (f", {_en['n_infeasible_any_class']} INFEASIBLE at any class"
+                     if _en['n_infeasible_any_class'] else ""))
         if sched_info["dock_capacity"]:
             print(f"Dock booking  : {sched_info['dock_capacity']} pads/dock x "
                   f"{sched_info['dock_hold_s']/60:.0f} min stop; "
@@ -4155,6 +4308,10 @@ def main() -> None:
                   f"{_pr['rebookings']} moved (mean shift {_pr['mean_drift_s']/60:.1f} min); "
                   f"{_pr['missions_deferred_for_pad']} missions held on the ground "
                   f"for want of a pad ({_pr['launch_deferral_events']} retries)")
+            print(f"Energy watch  : {_pr['energy_short_in_flight']} drones found short "
+                  f"of charge in flight and given the earliest pad; "
+                  f"{_pr['launches_held_low_battery']} launches held to charge; "
+                  f"{n_dead} ran flat")
         print(f"Dock capacity : {stats['dock_capacity']} pads/dock; peak use "
               + ", ".join(f"{k} {v}" for k, v in sorted(_pk.items()))
               + f"  -> {'OK, none over capacity' if not _over else 'OVER: ' + str(_over)}"

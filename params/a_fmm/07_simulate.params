@@ -226,6 +226,26 @@ RESERVATION_TOLERANCE_S = 120.0   # drift this large triggers a re-booking
 # hover over a dock that will still be full when it gets there.
 PAD_LAUNCH_SLIP_S       = 300.0
 
+# ----------------------------------------------------------------------
+# Energy feasibility -- do not launch a mission the battery cannot fly
+# ----------------------------------------------------------------------
+# Energy per metre is p0/(v*s) + cd*(v*s)^2, so the hover floor is DIVIDED by
+# speed: flying slower costs MORE energy per metre, and a slow drone in slow
+# airspace pays twice. Energy per metre bottoms out near 47 km/h here, so the
+# 30 km/h class is the expensive one and it is what runs flat on the long
+# routes -- 108 Wh over 13 km against 92 Wh at 50 km/h.
+#
+# Before a mission is cleared the scheduler prices its binding leg through the
+# cost-map (a round trip recharges to full at the dock, so the requirement is
+# ONE leg, not both) and, if the battery cannot cover it, raises the SPEED
+# CLASS -- cheapest-energy class first, which usually means flying faster. A
+# mission that no class can fly on one battery is reported rather than
+# launched into a known failure. In flight the check is repeated from the
+# drone's actual position and remaining charge; a drone that will not make it
+# is given the earliest pad available.
+ENERGY_RESERVE_PCT        = 0.20   # keep this fraction of the pack in hand
+ENERGY_HOLD_ALLOWANCE_PCT = 0.25   # expected hovering, as a share of flight energy
+
 # Deconfliction -------------------------------------------------------
 # FLOW_MODE controls lane occupancy:
 #   "spacing" -- many agents per lane, each kept >= SEPARATION_M behind the

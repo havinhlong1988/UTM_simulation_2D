@@ -44,7 +44,7 @@
 </div>
 <script src="network.js"></script>
 <script>
-const F={"aid":192,"focal":[[43,774.7,4179.0,1,0,3],[44,774.0,4175.4,1,0,3],[45,769.7,4166.7,1,0,3],[46,763.6,4152.9,1,0,3],[47,758.9,4134.4,1,0,3],[48,756.8,4112.0,1,0,3],[49,756.4,4083.1,1,0,3],[50,752.0,4050.9,1,0,3],[51,737.5,4024.1,1,0,3],[52,712.7,4002.4,1,0,3],[53,705.6,3969.0,1,0,3],[54,689.7,3927.2,1,0,3],[55,642.2,3896.8,1,0,3],[56,583.9,3869.5,1,0,3],[57,503.7,3843.6,1,0,3],[58,401.7,3843.2,1,0,3],[59,311.1,3800.1,1,0,3]],"stats":{"agent":192,"kind":"one_way","origin":"DB01","dest":"DK01","speed_kmh":60.0,"launch_s":860.0,"complete_s":1197.0,"flight_time_s":337.0,"route_len_m":774.0,"flown_m":774.0,"velocity_kmh":8.27,"air_velocity_kmh":8.24,"dock_idle_s":0.0,"n_holds":1,"hold_s":1.0,"energy_wh":5.89,"battery_end_pct":89.6,"completed":true,"battery_dead":false},"fcls":0}, NET=window.NETWORK;
+const F={"aid":192,"focal":[[43,738.7,4195.5,1,0,2],[44,725.2,4205.8,1,0,2],[45,707.8,4227.9,1,0,2],[46,691.6,4249.3,1,0,2],[47,661.2,4274.2,1,0,2],[48,612.0,4322.3,1,0,2],[49,510.7,4376.1,1,0,2],[50,345.9,4383.4,1,0,2],[51,129.5,4357.9,1,0,2],[52,162.4,4182.8,1,0,4],[53,203.3,3993.4,1,0,4],[54,233.0,3855.4,1,0,4]],"stats":{"agent":192,"kind":"one_way","origin":"DB01","dest":"DK01","speed_kmh":60.0,"launch_s":857.0,"complete_s":1092.0,"flight_time_s":235.0,"route_len_m":1317.7,"flown_m":1317.7,"velocity_kmh":20.19,"air_velocity_kmh":20.1,"dock_idle_s":0.0,"n_holds":2,"hold_s":2.0,"energy_wh":10.04,"battery_end_pct":92.1,"completed":true,"battery_dead":false},"fcls":0}, NET=window.NETWORK;
 const FO=F.focal;                 // [[kg, x, y, cat, hold], ...]
 const FR=NET.frames||[], TIMES=NET.times||[], CONF=NET.conflicts||[];
 const cv=document.getElementById('cv'), ctx=cv.getContext('2d');
