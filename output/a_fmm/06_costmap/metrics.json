@@ -1,0 +1,143 @@
+{
+  "version": "v2",
+  "grid": {
+    "nx": 134,
+    "ny": 133,
+    "res_m": 40.0,
+    "x0": -127.43263919928219,
+    "y0": -174.83783592646955
+  },
+  "weights": {
+    "econ": 1.0,
+    "air": 1.5,
+    "ground": 1.5,
+    "traffic": 1.0
+  },
+  "normalise_on": "network",
+  "corridor": {
+    "half_width_m": 60.0,
+    "frac_cells_inside": 0.4685,
+    "n_legs": 115,
+    "n_roundabouts": 19,
+    "lane_gap_m": 0.0
+  },
+  "traffic_samples": 62805,
+  "layers": {
+    "econ": {
+      "mean": 0.5388,
+      "min": 0.0,
+      "max": 1.0,
+      "p90": 0.7898
+    },
+    "air": {
+      "mean": 0.4139,
+      "min": 0.0,
+      "max": 1.0,
+      "p90": 0.7878
+    },
+    "ground": {
+      "mean": 0.3368,
+      "min": 0.0,
+      "max": 1.0,
+      "p90": 0.7159
+    },
+    "traffic": {
+      "mean": 0.1579,
+      "min": 0.0,
+      "max": 1.0,
+      "p90": 0.4013
+    },
+    "risk": {
+      "mean": 0.3646,
+      "min": 0.1195,
+      "max": 0.9169,
+      "p90": 0.6027
+    },
+    "slowness": {
+      "mean": 0.6365,
+      "min": 0.01,
+      "max": 0.8816,
+      "p90": 0.7982
+    }
+  },
+  "economic_balance": {
+    "value_gini_on_network": 0.278,
+    "mean_value": 0.4754,
+    "mean_cost": 0.4134,
+    "net_balance": 0.062
+  },
+  "worst_legs": [
+    {
+      "leg_id": "DK04__RBT12",
+      "risk": 0.8062,
+      "econ": 0.8835,
+      "air": 0.8677,
+      "ground": 0.7782
+    },
+    {
+      "leg_id": "DK01__DB01",
+      "risk": 0.7938,
+      "econ": 0.6024,
+      "air": 0.8052,
+      "ground": 0.973
+    },
+    {
+      "leg_id": "DB01__RBT15",
+      "risk": 0.7641,
+      "econ": 0.6159,
+      "air": 0.9848,
+      "ground": 0.6516
+    },
+    {
+      "leg_id": "RBT12__RBT15",
+      "risk": 0.7464,
+      "econ": 0.7091,
+      "air": 0.9432,
+      "ground": 0.6764
+    },
+    {
+      "leg_id": "DB01__TN7",
+      "risk": 0.7131,
+      "econ": 0.4283,
+      "air": 0.7994,
+      "ground": 0.8027
+    }
+  ],
+  "safest_legs": [
+    {
+      "leg_id": "TN16__RBT10",
+      "risk": 0.2139,
+      "econ": 0.7613,
+      "air": 0.1266,
+      "ground": 0.0595
+    },
+    {
+      "leg_id": "EXT01__EXT02",
+      "risk": 0.2058,
+      "econ": 0.8128,
+      "air": 0.1256,
+      "ground": 0.0166
+    },
+    {
+      "leg_id": "RN2__EXT02",
+      "risk": 0.2047,
+      "econ": 0.8156,
+      "air": 0.13,
+      "ground": 0.0026
+    },
+    {
+      "leg_id": "RN4__EXT01",
+      "risk": 0.2042,
+      "econ": 0.8682,
+      "air": 0.0851,
+      "ground": 0.0166
+    },
+    {
+      "leg_id": "RBT01__RBT02",
+      "risk": 0.174,
+      "econ": 0.286,
+      "air": 0.224,
+      "ground": 0.1355
+    }
+  ]
+}

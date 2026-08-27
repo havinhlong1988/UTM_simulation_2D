@@ -1,0 +1,311 @@
+{
+  "version": "v1",
+  "n_deliveries": 1000,
+  "n_patrols": 1,
+  "n_round_trips": 415,
+  "n_one_way": 439,
+  "n_contingency_backup": 97,
+  "n_contingency_return": 49,
+  "speed_classes_kmh": {
+    "60": 340,
+    "50": 334,
+    "30": 326
+  },
+  "n_completed": 1000,
+  "n_battery_dead": 0,
+  "n_unfinished": 0,
+  "time_headway_s": 30.0,
+  "charge_power_w": 600.0,
+  "charge_target_pct": 1.0,
+  "min_dest_idle_s": 1800.0,
+  "hold_penalty_m": 20000.0,
+  "mean_dock_charge_min": 5.195823293172691,
+  "n_dock_charges": 415,
+  "gridlock": false,
+  "flow_mode": "spacing",
+  "max_agents_on_a_lane": 3,
+  "min_same_lane_gap_m": 250.1874551403363,
+  "separation_respected": true,
+  "n_directed_leg_lanes": 230,
+  "routes_used": 24,
+  "routes_total": 24,
+  "merge_free_frac": 0.5,
+  "n_reroutes": 134,
+  "n_agents_diverted": 124,
+  "max_simultaneous_agents": 61,
+  "peak_backlog": 20,
+  "patrol_sorties": 31,
+  "patrol_interval_min": 30.0,
+  "conflict_time_s": 5.0,
+  "conflict_samples": 624,
+  "conflict_frames": 479,
+  "peak_simultaneous_conflicts": 5,
+  "cost_map_loaded": true,
+  "cost_map_min_slowness": 0.009999999776482582,
+  "mean_wait_for_leg_s": 16396.774,
+  "max_wait_for_leg_s": 52715.0,
+  "shift_hours": 1.0,
+  "sim_end_hours": 15.450277777777778,
+  "node_mutex_enabled": false,
+  "hold_cause": {
+    "leader": 7056,
+    "node": 0,
+    "block": 74557,
+    "launch_queue": 15714
+  },
+  "flight_levels": 6,
+  "launch_spacing_s": 2.0,
+  "reference_separation_m": 250.00000000000003,
+  "min_closest_approach_m": 0.15215762044124578,
+  "separation_standard": {
+    "horizontal_m": 50.0,
+    "longitudinal_s": 30.0,
+    "min_horizontal_observed_m": 0.15215762044124578,
+    "min_in_trail_gap_observed_m": 250.1874551403363,
+    "pair_samples_checked": 175954,
+    "violation_samples": 382,
+    "violation_frames": 314,
+    "peak_simultaneous_violations": 4,
+    "worst_horizontal_m": 0.15215762044124578,
+    "violation_rate": 0.002171021971651682,
+    "horizontal_respected": false
+  },
+  "centreline_compliance": {
+    "ring_travel": true,
+    "roundabout_rule": "one-way CCW, exit right",
+    "position_samples": 59233,
+    "zone_model": "2-D ORCA area (violation = inside the central island)",
+    "inside_ring_interior_samples": 0,
+    "respected": true
+  },
+  "scheduling": {
+    "mode": "ctot",
+    "scheduled": 1000,
+    "headway_s": 30.0,
+    "origin_cap": 29,
+    "dock_capacity": 5,
+    "dock_hold_s": 2400.0,
+    "n_parking_missions": 415,
+    "mean_eta_to_dock_s": 752.4,
+    "n_pushed_for_dock": 286,
+    "mean_dock_push_s": 1968.4,
+    "bin_s": 5.0,
+    "dock_cap_for_plot": 5,
+    "n_delayed": 984,
+    "mean_delay_s": 16647.41869918699,
+    "last_ctot_s": 52715.0,
+    "span_h": 14.643055555555556,
+    "n_departure_lanes": 16
+  },
+  "orca": {
+    "enabled": true,
+    "agent_steps_in_zones": 228343,
+    "agent_radius_m": 25.0,
+    "pair_clearance_m": 50.0,
+    "tau_s": 4.0
+  },
+  "peak_holding": 12,
+  "total_hold_events": 7045,
+  "total_hold_minutes": 1461.8333333333333,
+  "mean_flight_time_s": 1935.894,
+  "velocity": {
+    "door_to_door_kmh": 10.47,
+    "airborne_kmh": 17.13,
+    "nominal_cruise_kmh": 46.88,
+    "total_distance_km": 5632.1,
+    "total_time_h": 537.75
+  },
+  "dock_stop": {
+    "min_idle_s": 1800.0,
+    "charge_target_pct": 1.0,
+    "conflict_exempt": true,
+    "note": "a drone parked at a dock is not airborne traffic, so it is excluded from the separation and conflict checks",
+    "exempt_agent_samples": 37658,
+    "peak_docked": 33,
+    "park_buffer_s": 600.0,
+    "capacity_per_dock": 5,
+    "peak_per_dock": {
+      "DB02": 5,
+      "DK01": 5,
+      "DB01": 5,
+      "DK03": 5,
+      "DK06": 5,
+      "DK04": 5,
+      "DK02": 5,
+      "DK05": 5
+    },
+    "dock_full_holds": 3353,
+    "capacity_respected": true
+  },
+  "total_flown_km": 6132.0880298089505,
+  "balance_routes": true,
+  "arrival_window_h": 0.0,
+  "deadline_all_finish_h": 15.5,
+  "deadline_target_h": 1.0,
+  "deadline_table": [
+    {
+      "within_h": 1.0,
+      "done": 99,
+      "pct": 9.9
+    },
+    {
+      "within_h": 1.5,
+      "done": 148,
+      "pct": 14.8
+    },
+    {
+      "within_h": 2.0,
+      "done": 213,
+      "pct": 21.3
+    },
+    {
+      "within_h": 2.5,
+      "done": 284,
+      "pct": 28.4
+    },
+    {
+      "within_h": 3.0,
+      "done": 331,
+      "pct": 33.1
+    },
+    {
+      "within_h": 3.5,
+      "done": 393,
+      "pct": 39.3
+    },
+    {
+      "within_h": 4.0,
+      "done": 459,
+      "pct": 45.9
+    },
+    {
+      "within_h": 4.5,
+      "done": 526,
+      "pct": 52.6
+    },
+    {
+      "within_h": 5.0,
+      "done": 588,
+      "pct": 58.8
+    },
+    {
+      "within_h": 5.5,
+      "done": 653,
+      "pct": 65.3
+    },
+    {
+      "within_h": 6.0,
+      "done": 696,
+      "pct": 69.6
+    },
+    {
+      "within_h": 6.5,
+      "done": 736,
+      "pct": 73.6
+    },
+    {
+      "within_h": 7.0,
+      "done": 755,
+      "pct": 75.5
+    },
+    {
+      "within_h": 7.5,
+      "done": 770,
+      "pct": 77.0
+    },
+    {
+      "within_h": 8.0,
+      "done": 788,
+      "pct": 78.8
+    },
+    {
+      "within_h": 8.5,
+      "done": 807,
+      "pct": 80.7
+    },
+    {
+      "within_h": 9.0,
+      "done": 826,
+      "pct": 82.6
+    },
+    {
+      "within_h": 9.5,
+      "done": 845,
+      "pct": 84.5
+    },
+    {
+      "within_h": 10.0,
+      "done": 867,
+      "pct": 86.7
+    },
+    {
+      "within_h": 10.5,
+      "done": 884,
+      "pct": 88.4
+    },
+    {
+      "within_h": 11.0,
+      "done": 904,
+      "pct": 90.4
+    },
+    {
+      "within_h": 11.5,
+      "done": 923,
+      "pct": 92.3
+    },
+    {
+      "within_h": 12.0,
+      "done": 932,
+      "pct": 93.2
+    },
+    {
+      "within_h": 12.5,
+      "done": 948,
+      "pct": 94.8
+    },
+    {
+      "within_h": 13.0,
+      "done": 961,
+      "pct": 96.1
+    },
+    {
+      "within_h": 13.5,
+      "done": 974,
+      "pct": 97.4
+    },
+    {
+      "within_h": 14.0,
+      "done": 980,
+      "pct": 98.0
+    },
+    {
+      "within_h": 14.5,
+      "done": 990,
+      "pct": 99.0
+    },
+    {
+      "within_h": 15.0,
+      "done": 997,
+      "pct": 99.7
+    },
+    {
+      "within_h": 15.5,
+      "done": 1000,
+      "pct": 100.0
+    }
+  ],
+  "energy_hover_w": 220.0,
+  "energy_drag_coef": 0.05,
+  "battery_wh": 200.0,
+  "energy_optimal_kmh": 46.8,
+  "energy_total_kwh": 51.84367769833449,
+  "energy_deliveries_kwh": 48.24528548763628,
+  "energy_patrol_kwh": 3.59839221069821,
+  "energy_mean_wh_per_mission": 48.2452854876363,
+  "energy_wh_by_class": {
+    "30": 49.33,
+    "50": 47.04,
+    "60": 48.39
+  },
+  "missions_over_battery": 0
+}

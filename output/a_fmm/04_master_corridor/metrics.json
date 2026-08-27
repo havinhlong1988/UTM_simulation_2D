@@ -25,16 +25,16 @@
     "map_w_m": 5050.0,
     "map_h_m": 5050.0
   },
-  "n_nofly_cells": 1550,
+  "n_nofly_cells": 1615,
   "n_pairs": 12,
-  "n_routes": 88,
-  "n_crossings": 4,
+  "n_routes": 72,
+  "n_crossings": 14,
   "prioritize_by_density": true,
   "cross_penalty": 12.0,
   "pair_source": "corridor",
   "nofly_as_obstacle": true,
-  "mean_route_length_m": 4736.6,
+  "mean_route_length_m": 5131.6,
   "mean_corridor_length_m": NaN,
-  "mean_risk_exposure": 0.3337,
+  "mean_risk_exposure": 0.412,
   "mean_conflict_exposure": 0.0
 }

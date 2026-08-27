@@ -1,0 +1,382 @@
+{
+  "description": "Random 2D node-based LAE-UTM riskmap",
+  "seed": 2298177982,
+  "seed_spec": "time",
+  "width_m": 5000.0,
+  "height_m": 5000.0,
+  "dx_m": 50.0,
+  "n_nodes": 10201,
+  "obstacle_rate_target": 0.1,
+  "obstacle_rate_actual": 0.09999019703950593,
+  "ra_rate_actual": 0.06773845701401823,
+  "nofly_rate_actual": 0.15831781197921774,
+  "flyable_slowness": 0.085,
+  "nofly_slowness": 10.0,
+  "nofly_rule": "slowness >= 10.0",
+  "objects": {
+    "DB": [
+      {
+        "type": "DB",
+        "label": "DB01",
+        "node_id": 8498,
+        "x": 700.0,
+        "y": 4200.0,
+        "z": 0.0
+      },
+      {
+        "type": "DB",
+        "label": "DB02",
+        "node_id": 1255,
+        "x": 2150.0,
+        "y": 600.0,
+        "z": 0.0
+      }
+    ],
+    "DK": [
+      {
+        "type": "DK",
+        "label": "DK01",
+        "node_id": 7781,
+        "x": 200.0,
+        "y": 3850.0,
+        "z": 0.0
+      },
+      {
+        "type": "DK",
+        "label": "DK02",
+        "node_id": 6143,
+        "x": 4150.0,
+        "y": 3000.0,
+        "z": 0.0
+      },
+      {
+        "type": "DK",
+        "label": "DK03",
+        "node_id": 8232,
+        "x": 2550.0,
+        "y": 4050.0,
+        "z": 0.0
+      },
+      {
+        "type": "DK",
+        "label": "DK04",
+        "node_id": 5278,
+        "x": 1300.0,
+        "y": 2600.0,
+        "z": 0.0
+      },
+      {
+        "type": "DK",
+        "label": "DK05",
+        "node_id": 5600,
+        "x": 2250.0,
+        "y": 2750.0,
+        "z": 0.0
+      },
+      {
+        "type": "DK",
+        "label": "DK06",
+        "node_id": 2187,
+        "x": 3300.0,
+        "y": 1050.0,
+        "z": 0.0
+      }
+    ],
+    "FLZ": [
+      {
+        "type": "FLZ",
+        "label": "FLZ01",
+        "node_id": 5120,
+        "x": 3500.0,
+        "y": 2500.0,
+        "z": 0.0,
+        "corridor_dist_m": 179.3,
+        "obstacle_clearance_m": 583.1,
+        "corridor_overlap": 1
+      },
+      {
+        "type": "FLZ",
+        "label": "FLZ02",
+        "node_id": 6064,
+        "x": 200.0,
+        "y": 3000.0,
+        "z": 0.0,
+        "corridor_dist_m": 437.3,
+        "obstacle_clearance_m": 500.0,
+        "corridor_overlap": 1
+      },
+      {
+        "type": "FLZ",
+        "label": "FLZ03",
+        "node_id": 7343,
+        "x": 3550.0,
+        "y": 3600.0,
+        "z": 0.0,
+        "corridor_dist_m": 369.6,
+        "obstacle_clearance_m": 400.0,
+        "corridor_overlap": 1
+      },
+      {
+        "type": "FLZ",
+        "label": "FLZ04",
+        "node_id": 3266,
+        "x": 1700.0,
+        "y": 1600.0,
+        "z": 0.0,
+        "corridor_dist_m": 23.0,
+        "obstacle_clearance_m": 492.4,
+        "corridor_overlap": 2
+      }
+    ],
+    "RA": [
+      {
+        "type": "RA",
+        "label": "RA01",
+        "center_node_id": 2169,
+        "cx": 2400.0,
+        "cy": 1050.0,
+        "radius_m": 255.0579040860786,
+        "affected_nodes": 89
+      },
+      {
+        "type": "RA",
+        "label": "RA02",
+        "center_node_id": 1738,
+        "cx": 1050.0,
+        "cy": 850.0,
+        "radius_m": 517.9067384340833,
+        "affected_nodes": 341
+      },
+      {
+        "type": "RA",
+        "label": "RA03",
+        "center_node_id": 7700,
+        "cx": 1200.0,
+        "cy": 3800.0,
+        "radius_m": 453.2293925599339,
+        "affected_nodes": 261
+      }
+    ],
+    "obstacles": [
+      {
+        "type": "circle_obstacle",
+        "cx": 929.0245015845602,
+        "cy": 2997.3684434531533,
+        "radius_m": 245.8819289251119,
+        "added_nodes": 76
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 3058.8106160710986,
+        "cy": 4150.444561855312,
+        "radius_m": 118.66316045928195,
+        "added_nodes": 19
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 3749.9727625303385,
+        "cy": 1073.2356123648117,
+        "radius_m": 241.0082912077865,
+        "added_nodes": 74
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 528.2889439752282,
+        "cy": 843.2746644207843,
+        "radius_m": 196.3116946200651,
+        "added_nodes": 49
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 462.51254212632244,
+        "cy": 4147.449689920228,
+        "radius_m": 203.45709929262884,
+        "added_nodes": 52
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 1519.660466293482,
+        "cy": 4580.212628230608,
+        "radius_m": 102.02240527845596,
+        "added_nodes": 13
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 1882.5950496781593,
+        "cy": 4078.177317972829,
+        "radius_m": 103.88318465882105,
+        "added_nodes": 14
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 3619.632944032477,
+        "cy": 4234.781141411806,
+        "radius_m": 170.8910292460082,
+        "added_nodes": 36
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 4170.9260520434345,
+        "cy": 4045.6732375885404,
+        "radius_m": 79.58933845349037,
+        "added_nodes": 8
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 4348.567845239071,
+        "cy": 2296.2064760529406,
+        "radius_m": 121.08887452677656,
+        "added_nodes": 21
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 2553.0849179015563,
+        "cy": 2633.362645506937,
+        "radius_m": 68.85643717305703,
+        "added_nodes": 7
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 2513.7314150932175,
+        "cy": 4409.528374477592,
+        "radius_m": 61.581613457378225,
+        "added_nodes": 5
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 3107.160118746426,
+        "cy": 1776.848855497954,
+        "radius_m": 244.80145072931364,
+        "added_nodes": 77
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 2175.626690306086,
+        "cy": 1193.1670766919888,
+        "radius_m": 103.14945180184088,
+        "added_nodes": 14
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 1934.8239744769137,
+        "cy": 4645.802952213059,
+        "radius_m": 182.2341427493311,
+        "added_nodes": 41
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 3916.658238454746,
+        "cy": 569.2813598327912,
+        "radius_m": 205.67339055996428,
+        "added_nodes": 54
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 4366.022791740333,
+        "cy": 2218.15989699468,
+        "radius_m": 73.64537740232731,
+        "added_nodes": 1
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 878.4188319593509,
+        "cy": 4540.8250992382045,
+        "radius_m": 140.54078081463223,
+        "added_nodes": 25
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 3670.771633852234,
+        "cy": 4794.731503874362,
+        "radius_m": 70.59896613609774,
+        "added_nodes": 6
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 967.1193207976974,
+        "cy": 457.72199717385956,
+        "radius_m": 223.75163436895457,
+        "added_nodes": 63
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 1120.020729298753,
+        "cy": 1312.5795019659984,
+        "radius_m": 100.30854507052757,
+        "added_nodes": 13
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 2378.9052601827384,
+        "cy": 1437.8744464759416,
+        "radius_m": 215.49133060196152,
+        "added_nodes": 58
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 1268.8523526963118,
+        "cy": 2250.09601577949,
+        "radius_m": 182.97534982684274,
+        "added_nodes": 42
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 1351.7520951960887,
+        "cy": 2226.65035473377,
+        "radius_m": 239.6136721811839,
+        "added_nodes": 35
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 3695.411081836738,
+        "cy": 1308.9491565865753,
+        "radius_m": 141.23920696046972,
+        "added_nodes": 13
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 1795.4719464339917,
+        "cy": 4197.713367998947,
+        "radius_m": 237.00523140554964,
+        "added_nodes": 56
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 3178.1892646825813,
+        "cy": 3189.8387630513944,
+        "radius_m": 144.62691079593517,
+        "added_nodes": 28
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 3919.8321024140196,
+        "cy": 928.5654141072799,
+        "radius_m": 127.07249013794066,
+        "added_nodes": 8
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 3571.6870883860583,
+        "cy": 4153.264442152521,
+        "radius_m": 192.720711006217,
+        "added_nodes": 19
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 1062.8033645283558,
+        "cy": 1581.4026525065751,
+        "radius_m": 163.1523415247317,
+        "added_nodes": 32
+      },
+      {
+        "type": "circle_obstacle",
+        "cx": 2512.5750086182684,
+        "cy": 2411.51952449399,
+        "radius_m": 221.9596768121795,
+        "added_nodes": 61
+      }
+    ]
+  },
+  "output_xyz": "output/01_random_node_map/random_2d_node_riskmap_seed2298177982.xyz",
+  "output_figure": "output/01_random_node_map/random_2d_node_riskmap_seed2298177982.png"
+}
