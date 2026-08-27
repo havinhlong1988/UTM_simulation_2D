@@ -25,7 +25,10 @@ COST_MAP_FILE = "output/a_fmm/06_costmap/slowness_costmap.npz"
 # Planning-model .xyz grid from step 02 (has obstacle_flag / ra_flag); its
 # obstacles + no-fly (RA) cells are overlaid on 00_network_traffic.png. Absent
 # -> no overlay.
-OBSTACLE_MODEL_FILE = "output/02_thetastar_master_plan/planning_model_with_flz_support.xyz"
+OBSTACLE_MODEL_FILE = "output/01_random_node_map/random_2d_node_riskmap_seed2298177982.xyz"
+# Stage 05's own params, read for ROUNDABOUT_LANE_GAP_M so the ring geometry
+# modelled here matches the rings 05 actually built (0 = one single ring).
+CORRIDOR_PARAM_FILE = "params/a_fmm/05_corridor_network.params"
 
 # Fleet ---------------------------------------------------------------
 N_AGENTS        = 1000       # total delivery missions (demand)
@@ -37,6 +40,29 @@ MAX_CONCURRENT  = 150        # meter airborne agents to this many (lower -> fewe
                              #   simultaneous crossings/conflicts, longer makespan).
 LAUNCH_SPACING_S = 2.0       # min seconds between successive delivery launches, so
                              #   departures are spread in time (fewer conflicts).
+                             #   IGNORED when SCHEDULE_MODE is on (see below).
+
+# Coordination: STRATEGIC DEPARTURE SCHEDULING --------------------------
+# SCHEDULE_MODE assigns every mission a CTOT before the run, instead of metering
+# the queue reactively as it drains. The schedule is built so the separation
+# standard holds at the one point the operator controls -- the departure time:
+#   * successive departures on the SAME first leg-lane are >= SCHEDULE_HEADWAY_S
+#     apart (the in-trail standard, so the first corridor is never over-fed);
+#   * missions leaving the same origin on DIFFERENT first legs may depart
+#     together -- separate corridors are laterally separated already;
+#   * the predicted airborne count stays under MAX_CONCURRENT, and no single
+#     origin exceeds SCHEDULE_ORIGIN_CAP airborne (0 = the DCB fair share).
+# Missions are served FIRST-COME-FIRST-SERVED: processed in arrival order, so
+# an earlier mission gets first PICK of a slot. That is not a monotone departure
+# order -- a mission bound for a quiet lane and an empty dock clears before one
+# queued ahead of it that needs a busy one. figures/04_schedule.png shows this.
+# With SCHEDULE_MODE on, LAUNCH_SPACING_S and DCB_MODE are switched off -- the
+# plan already meters the same traffic, and running both fights the plan. The
+# physical merge check still has the last word at launch.
+SCHEDULE_MODE      = True
+SCHEDULE_HEADWAY_S = 30.0    # per-departure-corridor slot spacing (= TIME_HEADWAY_S)
+SCHEDULE_BIN_S     = 5.0     # resolution of the predicted-occupancy profile
+SCHEDULE_ORIGIN_CAP = 0      # airborne cap per origin; 0 = DCB fair share
 ROUND_TRIP_PROB = 0.5        # P(non-contingency mission is a round trip)
 SIM_SEED        = 12345      # RNG seed for reproducible fleets
 
@@ -52,7 +78,7 @@ START_BATTERY_PCT = 1.0      # battery charge at first launch
 # Dock charging: at each dock the drone recharges; it may only depart again
 # once it reaches CHARGE_TARGET_PCT. Charge time = (target - level)/CHARGE_POWER.
 CHARGE_POWER_W    = 600.0    # charge rate (W)  -> ~20 min for a full 200 Wh pack
-CHARGE_TARGET_PCT = 0.9      # must reach 90% battery before leaving a dock
+CHARGE_TARGET_PCT = 1.0      # must be FULLY charged before leaving a dock
 
 # UAV speed classes ---------------------------------------------------
 SPEED_CLASSES_KMH   = [60.0, 50.0, 30.0]   # 3 UAV classes
@@ -107,10 +133,49 @@ PATROL_LAPS         = 1      # perimeter loops per sortie
 PATROL_SPEED_KMH    = 50.0   # patrol cruise speed
 PATROL_AS_OBSTACLE  = True   # deliveries yield to / space behind the patrol
 
-# RIGHT-HAND TRAFFIC on roundabout rings (only active when RING_TRAVEL is on):
-# every agent circulates counter-clockwise once inside a ring, so nobody cuts
-# across the wrong way. Off -> legacy shorter-arc rule.
+# Roundabout circulation ----------------------------------------------
+# RING_TRAVEL: a route passing THROUGH a roundabout node gets a ring ARC spliced
+# in, so the agent circulates the ring instead of flying straight across its
+# centre. Off, routes cut the corner through the ring interior -- which is not a
+# lane (stage 06 raises its cost for exactly that reason), so this must be ON for
+# centreline compliance. metrics.json counts any position inside a ring interior.
+RING_TRAVEL         = True
+# RIGHT-HAND TRAFFIC on the rings: every agent circulates COUNTER-CLOCKWISE, so
+# nobody ever takes a clockwise short-cut the wrong way. Because CCW keeps the
+# island on the left, every exit leaves to the RIGHT of the direction of travel
+# -- checked on this network: all 106 ring-incident legs exit right, none left.
 RING_RIGHT_HAND     = True
+# With ROUNDABOUT_LANE_GAP_M = 0 stage 05 builds ONE ring, so both travel
+# directions share the same physical circle and must share one traffic resource;
+# RING_WRAP_FOLLOW makes the in-trail headway hold across the 2*pi*r seam, which
+# is what makes the 30 s standard real on a ring rather than nominal.
+RING_WRAP_FOLLOW    = True
+
+# ORCA inside the roundabouts -----------------------------------------
+# A 40 m ring has a 251 m circumference: at the 50 m separation standard that
+# holds FIVE agents, and the first 1000-drone run peaked at NINE on the busiest
+# ring. No coordination rule can fix a 1.8x oversubscription -- only geometry
+# can, so stage 05 now sizes rings from predicted density (77-126 m here). ORCA
+# is what USES that area: inside a zone an agent picks a free 2-D velocity by
+# reciprocal collision avoidance (each pair splits the avoidance half and half)
+# instead of queueing on a 1-D arc. Its preferred velocity is the roundabout
+# rule -- circulate CCW at cruise until its exit bearing comes up, then peel off
+# right -- and the solver returns the closest velocity that keeps every pair
+# >= 2*ORCA_RADIUS_M apart and everyone between the island and the outer edge.
+# Implemented in src/orca.py (numpy only; no Cython build, no AGPL dependency).
+ORCA_RINGS          = True
+ORCA_RADIUS_M       = 25.0   # half the horizontal standard -> 50 m pair clearance
+ORCA_TAU_S          = 4.0    # look-ahead; sized to the zone, not the open map
+ORCA_ZONE_MARGIN_M  = 25.0   # ring buffer half-width; zone edge = radius + this
+ORCA_ISLAND_FRAC    = 0.35   # centre kept clear (fraction of radius), so agents
+                             #   still circulate instead of cutting straight over
+# ORCA is exactly symmetric, so head-on / antipodal pairs deadlock at the
+# separation distance forever. Measured on the standard benchmarks: head-on pair
+# unresolved after 1500 steps at 0 deg, resolved in 72 at 3 deg, with separation
+# held either way. A RIGHT bias also matches right-hand traffic convention.
+ORCA_BIAS_DEG       = 3.0
+ORCA_EXIT_ANGLE_DEG = 25.0   # start lining up on the exit inside this much sweep
+ORCA_EXIT_TOL_M     = 30.0   # counted as "at the exit" within this distance
 
 # Contingencies -------------------------------------------------------
 # A fraction of trips hit a "false condition" mid-outbound and must
@@ -126,9 +191,25 @@ DK_PREFIX = "DK"
 
 # Flight dynamics -----------------------------------------------------
 SERVICE_TIME_S = 60.0         # dwell at the far end before a round-trip return
-# After arriving at the destination (round trips), the agent must idle at the
-# dock at least this long (charge / reload) before flying the return leg.
-MIN_DEST_IDLE_S = 300.0       # >= 5 minutes
+# After arriving at the destination (round trips), the agent PARKS at the dock
+# for at least this long -- long enough to charge to CHARGE_TARGET_PCT and
+# reload -- before flying the return leg. A parked drone sits on the pad: it is
+# not airborne traffic, draws no hover power, and is EXEMPT from the separation
+# and conflict checks (it is outside the airborne set by construction, and
+# metrics.json reports how many agent-samples that exemption covered).
+MIN_DEST_IDLE_S = 1800.0      # 30 minutes parked at the dock (charging)
+# Physical dock capacity. A pad is occupied for DOCK_PARK_BUFFER_S (manoeuvring
+# onto and off the pad) plus MIN_DEST_IDLE_S (charging) = 40 min per visit.
+# The DEPARTURE scheduler books a pad before clearing a mission to launch: it
+# predicts the arrival time with eta_seconds(), which prices the route through
+# the cost-map (true velocity = slowness * cruise) instead of assuming cruise
+# speed, and if the dock would be full on arrival the departure is PUSHED BACK.
+# Holding a drone on the ground is strictly better than sending it to hover
+# over a full dock burning battery. The capacity is enforced at run time too,
+# as a safety net: metrics.json reports peak use per dock and how many
+# arrivals ever had to wait, which should stay near zero if the plan holds.
+DOCK_CAPACITY      = 5        # drones that can be parked at one dock at once
+DOCK_PARK_BUFFER_S = 600.0    # 10 min of pad time on top of the charging stop
 
 # Deconfliction -------------------------------------------------------
 # FLOW_MODE controls lane occupancy:
@@ -142,8 +223,18 @@ FLOW_MODE      = "spacing"
 # Separation is a TIME headway: an agent stays >= TIME_HEADWAY_S seconds behind
 # the one ahead, so the distance gap scales with speed (30 s = 500 m at 60 km/h,
 # 250 m at 30 km/h). SEPARATION_M is only a lower-bound floor.
-TIME_HEADWAY_S = 30.0
-SEPARATION_M   = 80.0         # distance floor (m) under the time headway
+# SEPARATION STANDARD -- two halves, measured separately:
+#   LONGITUDINAL (in trail, SAME corridor): TIME_HEADWAY_S seconds. A follower
+#     never closes inside this, so the distance gap scales with speed
+#     (30 s = 250 m at 30 km/h, 500 m at 60 km/h).
+#   HORIZONTAL (lateral, ANY corridor, same flight level): SEPARATION_M metres.
+#     This is also the floor under the time headway, and it matches the corridor
+#     network's own build rule -- 05 keeps the two lane centrelines of every leg
+#     >= 50 m apart (centerline_min_separation_m), so a compliant pair passes on
+#     its own geometry. metrics.json reports every same-level pair-sample that
+#     comes closer, with no same-leg exemption.
+TIME_HEADWAY_S = 30.0         # longitudinal (in-trail) minimum
+SEPARATION_M   = 50.0         # horizontal (lateral) minimum
 # A CONFLICT (marked with a red star) is a near-miss between agents on
 # DIFFERENT corridors: they come within CONFLICT_TIME_S seconds of impact
 # (distance below CONFLICT_TIME_S * the faster agent's speed). 5 s ~= 80 m
@@ -183,7 +274,7 @@ BASE_LEVEL_M  = 60.0          # altitude of the lowest band (m)
 # network under 1000-agent load (circular waits at hubs -> only ~1% finish), so
 # it is left OFF -- flight levels + metering already cut conflicts ~78% without
 # any throughput loss. Enable only with much smaller zones / lighter load.
-NODE_MUTEX_ENABLE = True
+NODE_MUTEX_ENABLE = False
 NODE_APPROACH_M      = 20.0   # node-mutex zone at traffic nodes (if enabled)
 OBJECTIVE_APPROACH_M = 50.0   # node-mutex zone at DB/DK hubs (if enabled)
 

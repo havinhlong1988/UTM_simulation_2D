@@ -14,21 +14,62 @@ launch window. Every mission rides the precomputed corridor route
 (pair_routes.csv) leg by leg, following the two-lane centreline geometry
 (lane_nodes.csv).
 
-Deconfliction -- both spatial and temporal at once
---------------------------------------------------
-  SPATIAL   Every leg carries two parallel lanes. An agent always takes
-            the lane on the RIGHT of its travel direction (right-hand
-            rule), so the two travel directions of a leg occupy
-            physically different, construction-separated lanes and can
-            never meet head-on. Opposing directions are therefore
-            disjoint traffic resources.
+Separation standard
+-------------------
+Two halves, declared in the params and measured separately:
 
-  TEMPORAL  On a shared lane, a follower never closes to within the
-            safety gap of the agent ahead (car-following). To enter the
-            next leg an agent must find its entry slot clear -- otherwise
-            it HOLDS at the upstream node (or queues at the depot before
-            launch). Merges at a node are serialised by the same entry
-            gate, so two agents never occupy the same slot.
+  HORIZONTAL   SEPARATION_M metres between any two agents at the same
+               flight level, whatever corridor each is on (50 m). This
+               is also the rule stage 05 builds to -- the two lane
+               centrelines of every leg are kept >= 50 m apart -- so a
+               compliant pair passes on its own geometry.
+
+  LONGITUDINAL TIME_HEADWAY_S seconds in trail on a shared lane, i.e.
+               between agents travelling the SAME corridor (30 s). The
+               distance gap therefore scales with speed (250 m at
+               30 km/h, 500 m at 60 km/h) and never drops below the
+               horizontal minimum.
+
+Compliance is reported, not assumed: metrics.json carries every
+same-level pair-sample checked and every one that came closer than the
+standard, and separation_violations.csv says WHERE each loss happened.
+
+Coordination -- scheduling first, tactical second
+-------------------------------------------------
+  STRATEGIC  schedule_departures() assigns every mission a CTOT before
+             the run: departures on one first leg-lane are spaced by the
+             in-trail headway, predicted airborne stays under
+             MAX_CONCURRENT, and no origin exceeds its fair share. The
+             fleet is deconflicted on paper at the one point the
+             operator controls -- the departure time (SCHEDULE_MODE).
+
+  SPATIAL    Every leg carries two parallel lanes and each travel
+             direction takes its own, so opposing traffic occupies
+             physically separated lanes and disjoint resources. Legs are
+             additionally split into flight levels by heading, so
+             crossing traffic is separated vertically.
+
+  ROUNDABOUTS A route through a ring node gets a circulating ARC spliced
+             in (RING_TRAVEL). Circulation is one-way COUNTER-CLOCKWISE
+             (RING_RIGHT_HAND), which keeps the island on the left and
+             therefore puts every exit on the RIGHT of the direction of
+             travel. Legs are clipped at the ring boundary, so an agent
+             joins and leaves the circulation on the ring itself and
+             never crosses the enclosed disk.
+
+  DOCK STOP  A round trip PARKS at the destination dock for MIN_DEST_IDLE_S
+             and recharges to CHARGE_TARGET_PCT before flying home. A parked
+             drone is not airborne traffic: it holds no corridor, draws no
+             hover power, is exempt from the separation and conflict checks
+             (it is outside the airborne set by construction), and does not
+             consume the MAX_CONCURRENT airborne budget. metrics.json reports
+             how many agent-samples that exemption covered.
+
+  TACTICAL   On a shared lane a follower never closes inside the headway
+             (car-following). To enter the next leg an agent must find
+             its entry slot clear -- otherwise it HOLDS at the upstream
+             node. This is the safety net under the schedule, not the
+             primary coordination.
 
 The clock, positions and the live minimum pairwise separation are shared
 by every output.
@@ -43,7 +84,13 @@ Explicit CLI flags override the params file.
 
 Outputs (output/08_agent_sim_2d/)
 ---------------------------------
-    agent_missions.csv    one row per mission (endpoints, timings, holds)
+    agent_missions.csv    one row per mission (endpoints, timings, holds) plus
+                          the ACHIEVED velocity: velocity_kmh = distance flown /
+                          total mission time (launch -> complete, so it carries
+                          holds, cost-map slow-downs and the dock stop), and
+                          air_velocity_kmh = the same over airborne time only
+    separation_violations.csv  every loss of the horizontal standard:
+                          time, both agents, gap, location, both corridors
     sim_timeline.csv      per-sample airborne / holding counts, min sep
     trajectories.csv      downsampled agent positions over time
     metrics.json          fleet-level summary + deconfliction check
@@ -72,6 +119,7 @@ from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.lines import Line2D
 
 from src.maprule import add_map_rule
+from src.orca import orca_step
 
 THIS_DIR = Path(__file__).resolve().parent
 VERSION = "v1"
@@ -192,8 +240,10 @@ def interp_xy(xy: np.ndarray, cs: np.ndarray, s: float) -> np.ndarray:
 def load_costmap(path):
     """Load the slowness cost-map produced by 08_generate_costmap.py.
     Returns (grid[ny,nx], x0, y0, res, nx, ny) or None if absent."""
+    if not str(path or "").strip():        # blank -> THIS_DIR, which exists
+        return None
     p = THIS_DIR / str(path)
-    if not p.exists():
+    if not p.is_file():
         return None
     z = np.load(p)
     g = z["slowness"].astype(float)
@@ -418,7 +468,14 @@ class Network:
         if self.ring_right_hand:
             # right-hand rule: ALWAYS circulate CCW; lane picked by travel dir.
             direction, sweep = +1.0, d_ccw
-            r, res = (r_out, f"{rbt}#RINGA") if forward else (r_in, f"{rbt}#RINGB")
+            if abs(r_out - r_in) < 1e-6:
+                # SINGLE ring (05 built it with ROUNDABOUT_LANE_GAP_M = 0): both
+                # travel directions ride the SAME physical circle, so they must
+                # also share ONE traffic resource -- otherwise two agents at the
+                # same point are metered separately and the headway is fiction.
+                r, res = r_out, f"{rbt}#RING"
+            else:
+                r, res = (r_out, f"{rbt}#RINGA") if forward else (r_in, f"{rbt}#RINGB")
         elif d_ccw <= math.pi:                    # CCW shorter -> outer red, forward
             direction, r, res, sweep = +1.0, r_out, f"{rbt}#RINGA", d_ccw
         else:                                     # CW shorter -> inner blue, backward
@@ -431,24 +488,95 @@ class Network:
         return LegSeg(res, np.ascontiguousarray(xy, float), rbt, rbt,
                       s_offset=s_offset, ring_circ=two_pi * r)
 
+    @staticmethod
+    def _circle_cross(p_out: np.ndarray, p_in: np.ndarray, c: np.ndarray,
+                      r: float) -> np.ndarray:
+        """Point where the segment p_out->p_in (outside->inside) crosses the
+        circle (c, r). Solves |f + t*a|^2 = r^2 for the first root in [0, 1]."""
+        a = np.asarray(p_in, float) - np.asarray(p_out, float)
+        f = np.asarray(p_out, float) - np.asarray(c, float)
+        aa = float(a @ a)
+        if aa < 1e-12:
+            return np.asarray(p_out, float)
+        bb = 2.0 * float(f @ a)
+        cc = float(f @ f) - r * r
+        disc = bb * bb - 4.0 * aa * cc
+        if disc < 0.0:
+            return np.asarray(p_out, float)
+        rt = math.sqrt(disc)
+        for t in sorted(((-bb - rt) / (2.0 * aa), (-bb + rt) / (2.0 * aa))):
+            if -1e-9 <= t <= 1.0 + 1e-9:
+                return np.asarray(p_out, float) + min(max(t, 0.0), 1.0) * a
+        return np.asarray(p_out, float)
+
+    def clip_at_ring(self, xy: np.ndarray, rbt: str, at_end: bool) -> np.ndarray:
+        """Trim a leg polyline where it meets a roundabout's ring circle.
+
+        Legs are stored running all the way to the roundabout's NODE, which sits
+        at the ring CENTRE -- so splicing an arc onto the raw leg end sends the
+        agent down a radial spoke, across the island, and back out. Clipping the
+        leg at the ring boundary makes the entry/exit points lie ON the circle:
+        the arc is then tangent-continuous with the legs, the enclosed disk is
+        never entered, and the exit peels off to the RIGHT of CCW travel."""
+        c, r_out, _r_in = self.rings[rbt]
+        d = np.hypot(xy[:, 0] - c[0], xy[:, 1] - c[1])
+        # Anchor points sit EXACTLY on the circle, so a strict `d > r` test can
+        # call them outside on a rounding hair and leave the dip that follows
+        # them un-clipped (05's lane fit overshoots a few metres inside its own
+        # ring right after the anchor). Cut past the LAST inside-or-on point
+        # instead, which is insensitive to both.
+        eps = 1e-6 * max(r_out, 1.0)
+        inside = np.nonzero(d <= r_out + eps)[0]
+        if len(inside) == 0:
+            return xy                      # leg never touches the ring
+        if at_end:
+            k = int(inside[0]) - 1         # last point before it first goes inside
+            if k < 0:
+                return xy                  # starts inside: nothing to keep
+            return np.vstack([xy[:k + 1], self._circle_cross(xy[k], xy[k + 1], c, r_out)])
+        j = int(inside[-1]) + 1            # first point after it is last inside
+        if j >= len(xy):
+            return xy                      # ends inside: nothing to keep
+        return np.vstack([self._circle_cross(xy[j], xy[j - 1], c, r_out), xy[j:]])
+
     def route_segs(self, pairs) -> list[LegSeg]:
         """Legs of a route as directed segs, with a RING ARC spliced in wherever
-        the route passes through a roundabout node (ring_travel only)."""
+        the route passes through a roundabout node (ring_travel only). Legs that
+        touch a ring are CLIPPED at its boundary first (see clip_at_ring), so the
+        agent joins and leaves the circulation on the ring itself."""
         if not self.ring_travel or not self.rings:
             return self.pairs_to_segs(pairs)
         pairs = list(pairs)
         nodes = self.nodes_of(pairs)
         segs: list[LegSeg] = []
         for i, (lg, fwd) in enumerate(pairs):
-            seg = self.leg_seg(lg, fwd)
+            base = self.leg_seg(lg, fwd)
+            xy = base.xy
+            # clip at EVERY ring endpoint, including the route's own first and
+            # last node -- a diverted agent can start or finish at a roundabout,
+            # and an unclipped end there is a radial spoke across the island.
+            clip_end = nodes[i + 1] in self.rings
+            clip_start = nodes[i] in self.rings
+            if clip_end:
+                xy = self.clip_at_ring(xy, nodes[i + 1], at_end=True)
+            if clip_start:
+                xy = self.clip_at_ring(xy, nodes[i], at_end=False)
+            if clip_end or clip_start:
+                if len(xy) < 2:
+                    xy = base.xy           # degenerate clip: keep the raw leg
+                seg = LegSeg(base.res, np.ascontiguousarray(xy, float),
+                             base.src_node, base.dst_node)
+            else:
+                seg = base
             segs.append(seg)
             if i + 1 < len(pairs):
                 mid = nodes[i + 1]
                 if mid in self.rings:
-                    nxt = self.leg_seg(pairs[i + 1][0], pairs[i + 1][1])
+                    nb = self.leg_seg(pairs[i + 1][0], pairs[i + 1][1])
+                    nxt_xy = self.clip_at_ring(nb.xy, mid, at_end=False)
                     # travel direction through the ring = direction of the leg
                     # ARRIVING at it, so the outer/inner lane matches fwd/back.
-                    arc = self.ring_seg(mid, seg.xy[-1], nxt.xy[0],
+                    arc = self.ring_seg(mid, seg.xy[-1], nxt_xy[0],
                                         forward=bool(pairs[i][1]))
                     if arc is not None:
                         segs.append(arc)
@@ -465,7 +593,8 @@ class Agent:
                  "dist_m", "air_s", "hold_s", "n_holds", "holding", "was_holding",
                  "launch_t", "complete_t", "route_len", "held_node",
                  "speed", "speed_kmh", "is_patrol", "laps", "stuck_s", "n_reroutes",
-                 "cont_frac", "battery_wh", "charge_s", "n_charges", "is_priority")
+                 "cont_frac", "battery_wh", "charge_s", "n_charges", "is_priority",
+                 "sched_t", "orca_xy", "orca_v")
 
     def __init__(self, aid, origin, dest, round_trip, priority,
                  segs, kinds, dwell_dur, outbound_upto, route_len,
@@ -509,6 +638,11 @@ class Agent:
         self.launch_t = None
         self.complete_t = None
         self.held_node = None       # network node currently reserved for transit
+        self.sched_t = None         # CTOT from the departure scheduler (None = unscheduled)
+        # free 2-D state, live ONLY while the agent is inside a roundabout's ORCA
+        # zone. Everywhere else the agent is a 1-D point on a lane centreline.
+        self.orca_xy = None
+        self.orca_v = None
 
     @property
     def done(self) -> bool:
@@ -529,6 +663,8 @@ class Agent:
         return self.seg_idx < self.outbound_upto
 
     def position(self, obj_xy) -> np.ndarray:
+        if self.orca_xy is not None:      # inside a roundabout: real 2-D position
+            return self.orca_xy
         if self.seg_idx == -1:
             return self.segs[0].xy[0] if self.segs else obj_xy[self.origin]
         if self.kinds[self.seg_idx] == "dwell":
@@ -691,6 +827,250 @@ def build_fleet(net: Network, params, rng: np.random.Generator):
 # ======================================================================
 # Simulation
 # ======================================================================
+def route_time_factor(segs, slowness_at=None, sample_m: float = 100.0) -> float:
+    """Metre-seconds per (metre / (m/s)) along a route -- i.e. how much longer
+    the route takes than length/cruise would suggest.
+
+    The cost-map makes true velocity = slowness(x, y) * cruise, so travel time
+    is the integral of ds / (v * slowness). The legs are therefore sampled and
+    the MEAN OF 1/slowness taken -- not 1/mean, which would flatter exactly the
+    slow stretches that dominate the time. Returns the weighted factor f such
+    that eta = (route_length / cruise) * f; f = 1.0 with no cost-map."""
+    if slowness_at is None:
+        return 1.0
+    total_len = 0.0
+    total_w = 0.0
+    for sg in segs:
+        L = float(sg.length)
+        if L <= 0.0:
+            continue
+        n = max(2, int(L / sample_m) + 1)
+        inv = 0.0
+        for x in np.linspace(0.0, L, n):
+            px, py = interp_xy(sg.xy, sg.cs, float(x))
+            inv += 1.0 / min(max(slowness_at(px, py), 0.05), 1.0)
+        total_len += L
+        total_w += L * (inv / n)
+    return (total_w / total_len) if total_len > 0 else 1.0
+
+
+def _earliest_window(arr: np.ndarray, start: int, cap: int, width: int) -> int:
+    """First index >= start where `width` consecutive bins are all under `cap`.
+    Jumps over blocked runs rather than stepping, so a long horizon is cheap."""
+    n = len(arr)
+    width = max(1, width)
+    x = max(0, min(start, n - 1))
+    while x + width <= n:
+        blocked = np.nonzero(arr[x:x + width] >= cap)[0]
+        if len(blocked) == 0:
+            return x
+        x += int(blocked[-1]) + 1          # first index past the last blocker
+    return max(0, n - width)
+
+
+def schedule_departures(net: Network, agents: list[Agent], params,
+                        slowness_at=None) -> dict:
+    """STRATEGIC DEPARTURE SCHEDULING -- assign every mission a CTOT before the
+    run, instead of metering departures reactively as the queue drains.
+
+    This is the pre-tactical half of UTM coordination: the fleet is deconflicted
+    on paper first, so the separation standard is met BY CONSTRUCTION at the one
+    place the operator actually controls -- the departure time. Three constraints,
+    all applied at the earliest slot that satisfies them:
+
+      1. LONGITUDINAL, per departure corridor. Two missions leaving on the SAME
+         first leg-lane are spaced >= SCHEDULE_HEADWAY_S (default = the
+         TIME_HEADWAY_S in-trail standard, 30 s). Missions leaving the same
+         origin on DIFFERENT first legs are laterally separated by the corridor
+         geometry, so they may depart together -- the same rule the block model
+         already used, now enforced ahead of time.
+      2. CONCURRENCY. The predicted airborne count at the departure instant stays
+         under MAX_CONCURRENT; each mission books its predicted flight interval
+         (route length / cruise speed, plus dwell) into an occupancy profile.
+      3. ORIGIN FAIR SHARE. No origin may hold more than SCHEDULE_ORIGIN_CAP
+         airborne at once (default: the DCB fair share), so one hub cannot eat
+         the whole airborne budget while the other corridors sit idle.
+      4. DOCK PARKING. A dock holds DOCK_CAPACITY drones. A round trip parks
+         there for DOCK_PARK_BUFFER_S + MIN_DEST_IDLE_S (manoeuvring onto the
+         pad, then charging), so before a mission is cleared to launch its
+         arrival is predicted -- eta_seconds(), which prices the route through
+         the cost-map's slowness rather than assuming cruise speed -- and a pad
+         is booked for that window. If the dock would be full when it lands,
+         the DEPARTURE is pushed back until a pad frees: a drone is held on the
+         ground rather than sent to hover over a full dock burning battery.
+
+    Missions are served FIRST-COME-FIRST-SERVED: they are processed in arrival
+    order, so an earlier mission gets first pick of the slots. That is NOT the
+    same as a monotone departure order -- each mission contends for its own
+    departure lane and its own destination dock, so one bound for a quiet lane
+    and an empty dock can be cleared well before one queued ahead of it that
+    needs a busy one. (This is why simulate() sorts its release queue by CTOT,
+    not by arrival: gating on arrival order would serialise the whole fleet
+    behind the worst-scheduled mission.) Returns a summary dict. The reactive gates in simulate() stay in place as a
+    safety net -- a CTOT is a plan, and a plan can still meet a busy lane."""
+    dely = [a for a in agents if not a.is_patrol]
+    if not dely:
+        return {"scheduled": 0}
+    headway = float(pget(params, "SCHEDULE_HEADWAY_S",
+                         pget(params, "TIME_HEADWAY_S", 30.0)))
+    bin_s = max(1.0, float(pget(params, "SCHEDULE_BIN_S", 5.0)))
+    max_conc = int(pget(params, "MAX_CONCURRENT", 10 ** 9))
+    n_org = max(1, len({a.origin for a in dely}))
+    org_cap = int(pget(params, "SCHEDULE_ORIGIN_CAP", 0)) or \
+        max(1, math.ceil(float(pget(params, "DCB_CORRIDOR_SHARE", 1.5))
+                         * max_conc / n_org))
+    # only the SERVICE stop is booked: MIN_DEST_IDLE_S is spent parked at a dock,
+    # which is not airborne time and does not consume the concurrency budget.
+    dwell = float(pget(params, "SERVICE_TIME_S", 60.0))
+    dock_cap = int(pget(params, "DOCK_CAPACITY", 0))
+    dock_hold = float(pget(params, "DOCK_PARK_BUFFER_S", 600.0)) + \
+        float(pget(params, "MIN_DEST_IDLE_S", 1800.0))
+
+    # occupancy profile over a generous horizon, in bin_s buckets
+    span = float(pget(params, "SHIFT_HOURS", 1.0)) * 3600.0 * \
+        float(pget(params, "HORIZON_FACTOR", 12.0))
+    nb = int(math.ceil(max(span, 3600.0) / bin_s)) + 8
+    occ = np.zeros(nb, int)                              # airborne, all origins
+    occ_org: dict = {o: np.zeros(nb, int) for o in {a.origin for a in dely}}
+    occ_dock: dict = {d: np.zeros(nb, int) for d in {a.dest for a in dely}}
+    last_dep: dict = {}                                  # first-leg res -> last CTOT
+    hold_bins = int(math.ceil(dock_hold / bin_s))
+    n_dock_pushed = 0
+    dock_push_s = 0.0
+    eta_sum = 0.0
+    rows: list = []                     # the schedule itself, for audit + plotting
+    dock_series: dict = {d: None for d in occ_dock}
+
+    # Delivery agents are built with EMPTY segs -- their route is planned
+    # lazily at launch -- so the nominal corridor route has to be resolved here
+    # or every mission would look like a zero-length flight from a single
+    # pseudo-corridor. Cached per (origin, dest): the geometry is shared, only
+    # the cruise speed differs per agent.
+    _route_cache: dict = {}
+
+    def _nominal(a):
+        """(first leg-lane resource, route length m, cost-map time factor)."""
+        key = (a.origin, a.dest)
+        got = _route_cache.get(key)
+        if got is None:
+            pr = net.route_pairs(a.origin, a.dest)
+            if pr is None:
+                got = (f"__origin__{a.origin}", 0.0, 1.0)
+            else:
+                segs = net.route_segs(pr[0])
+                got = (segs[0].res if segs else f"__origin__{a.origin}",
+                       float(sum(sg.length for sg in segs)),
+                       route_time_factor(segs, slowness_at))
+            _route_cache[key] = got
+        return got
+
+    def _earliest_free(arr, b0, cap):
+        """First bin >= b0 whose count is under cap."""
+        room = arr[b0:] < cap
+        if room.all():
+            return b0
+        if not room.any():
+            return nb - 1
+        return b0 + int(np.argmax(room))
+
+    n_delayed = 0
+    total_delay = 0.0
+    for a in sorted(dely, key=lambda x: (x.arrival_t, x.priority)):
+        res, route_len, tfac = _nominal(a)
+        v = max(a.speed, 1e-3)
+        # (1) corridor headway
+        t0 = max(float(a.arrival_t), last_dep.get(res, -1e18) + headway)
+        b = min(max(int(math.ceil(t0 / bin_s)), 0), nb - 1)
+        og = occ_org[a.origin]
+        # a round trip parks; predict WHEN it lands so a pad can be booked
+        parks = bool(a.round_trip) and dock_cap > 0 and a.dest in occ_dock
+        # arrival = outbound length / cruise, priced through the cost-map
+        eta = (route_len / v) * tfac if parks else 0.0
+        eta_sum += eta
+        eta_bins = int(math.ceil(eta / bin_s))
+        dk = occ_dock[a.dest] if parks else None
+        b_first = b
+        # WHY this mission ends up where it does. FCFS order is preserved --
+        # scheduling only ever delays -- so the binding constraint is the whole
+        # story of the schedule, and it is recorded per mission.
+        reason = "ready" if t0 <= float(a.arrival_t) + 1e-9 else "corridor_headway"
+        # (2)(3)(4) concurrency, origin fair share and dock parking -- advance
+        # until all of them hold at the same slot
+        for _ in range(nb):
+            b2 = _earliest_free(occ, b, max_conc)
+            if b2 > b:
+                reason = "airborne_cap"
+            b3 = _earliest_free(og, b2, org_cap)
+            if b3 > b2:
+                reason = "origin_cap"
+            b4 = b3
+            if dk is not None:
+                # the pad is needed from eta after departure, for the whole stop
+                w = _earliest_window(dk, b3 + eta_bins, dock_cap, hold_bins)
+                b4 = max(b3, w - eta_bins)
+                if b4 > b3:
+                    reason = "dock_pad"
+            if b4 == b3 == b2:
+                b = b2
+                break
+            b = b4
+        if parks and b > b_first:
+            n_dock_pushed += 1
+            dock_push_s += (b - b_first) * bin_s
+        t = b * bin_s
+        # airborne duration: out (+ back for a round trip), cost-map priced.
+        # The dock stop is NOT airborne, so it is not part of this interval.
+        dur = (route_len / v) * tfac * (2.0 if a.round_trip else 1.0) \
+            + (dwell if a.round_trip else 0.0)
+        b_end = min(nb, b + int(math.ceil(dur / bin_s)) + 1)
+        occ[b:b_end] += 1
+        og[b:b_end] += 1
+        if dk is not None:                       # book the pad for the whole stop
+            d0 = min(nb - 1, b + eta_bins)
+            dk[d0:min(nb, d0 + hold_bins)] += 1
+        last_dep[res] = t
+        a.sched_t = t
+        rows.append({
+            "fcfs_rank": len(rows), "agent_id": a.aid,
+            "origin": a.origin, "dest": a.dest,
+            "round_trip": bool(a.round_trip), "speed_kmh": a.speed_kmh,
+            "arrival_s": round(float(a.arrival_t), 1),
+            "ctot_s": round(t, 1),
+            "delay_s": round(t - float(a.arrival_t), 1),
+            "binding": reason,
+            "first_leg": res,
+            "route_len_m": round(route_len, 1),
+            "eta_s": round((route_len / v) * tfac, 1),
+            "slowness_factor": round(tfac, 3),
+            "dock_hold_s": round(dock_hold, 1) if parks else 0.0,
+        })
+        if t > a.arrival_t + 1e-9:
+            n_delayed += 1
+            total_delay += t - a.arrival_t
+    ctots = [a.sched_t for a in dely]
+    n_park = sum(1 for a in dely if a.round_trip)
+    return {
+        "scheduled": len(dely),
+        "headway_s": headway,
+        "origin_cap": org_cap,
+        "dock_capacity": dock_cap,
+        "dock_hold_s": dock_hold,
+        "n_parking_missions": n_park,
+        "mean_eta_to_dock_s": round(eta_sum / max(n_park, 1), 1),
+        "n_pushed_for_dock": n_dock_pushed,
+        "mean_dock_push_s": round(dock_push_s / max(n_dock_pushed, 1), 1),
+        "rows": rows,
+        "bin_s": bin_s,
+        "dock_cap_for_plot": dock_cap,
+        "dock_profile": {d: occ_dock[d].tolist() for d in occ_dock},
+        "n_delayed": n_delayed,
+        "mean_delay_s": (total_delay / n_delayed) if n_delayed else 0.0,
+        "last_ctot_s": max(ctots),
+        "span_h": max(ctots) / 3600.0,
+        "n_departure_lanes": len(last_dep),
+    }
+
+
 def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     """Per-LEG block simulation. A directed leg-lane is a block that holds
     at most ONE agent at a time ("same leg cannot be captured by two
@@ -764,6 +1144,16 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     # (scheduling-level deconfliction, NASA-UTM style) -> fewer hot-node pileups.
     # A/B KEEP: completed +5.4%, holds -13%, battery_dead -38% vs the pre-DCB base.
     dcb_mode = bool(pget(params, "DCB_MODE", True))
+    # SCHEDULE_MODE: departures come from schedule_departures()'s CTOTs instead of
+    # the reactive meters. The schedule already enforces the corridor headway, the
+    # concurrency cap and the origin fair share at PLAN time, so the global launch
+    # spacing and the DCB rotation are switched off -- leaving them on would meter
+    # the same traffic twice and fight the plan. enter_leg() still has the last
+    # word: a CTOT is a plan, and the lane may nonetheless be occupied on the day.
+    schedule_mode = bool(pget(params, "SCHEDULE_MODE", False))
+    if schedule_mode:
+        launch_spacing = 0.0
+        dcb_mode = False
     # each corridor may hold at most dcb_share * (max_concurrent / n_origins)
     # airborne (slack > 1 lets demand imbalance still fill capacity); or set an
     # absolute DCB_CORRIDOR_CAP to override the derived value.
@@ -819,6 +1209,31 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     # RING_METER is a master switch turning BOTH on (the original A7 = KILL: the
     # meter's entry holds drove hover-drain battery deaths past gate G3). A7b runs
     # RING_WRAP_FOLLOW alone.
+    # ---- ORCA inside the roundabouts ------------------------------------
+    # A 40 m ring has a 251 m circumference: at a 50 m separation standard it
+    # holds FIVE agents, and the first 1000-drone run peaked at NINE on the
+    # busiest ring -- 1.8x oversubscribed, which no coordination rule can fix,
+    # only geometry can. Stage 05 now sizes rings from the predicted density
+    # (77-126 m here), which turns each one into a real 2-D manoeuvring area,
+    # and ORCA is what uses that area: inside the zone agents choose a free 2-D
+    # velocity by reciprocal collision avoidance instead of queueing on an arc.
+    orca_rings = bool(pget(params, "ORCA_RINGS", False))
+    # half the horizontal separation standard: a pair is clear when their
+    # centres are more than 2*orca_radius apart
+    orca_radius = float(pget(params, "ORCA_RADIUS_M", 0.5 * sep_floor))
+    orca_tau = float(pget(params, "ORCA_TAU_S", 12.0))       # look-ahead horizon
+    orca_half_w = float(pget(params, "ORCA_ZONE_MARGIN_M", 25.0))  # ring buffer half-width
+    orca_island = float(pget(params, "ORCA_ISLAND_FRAC", 0.35))    # kept-clear centre
+    # ORCA is exactly symmetric, so head-on / antipodal pairs deadlock at the
+    # separation distance forever. A few degrees of RIGHT bias breaks it (and
+    # matches right-hand traffic); measured: head-on pair unresolved after 1500
+    # steps at 0 deg, resolved in 72 at 3 deg, separation held either way.
+    orca_bias_deg = float(pget(params, "ORCA_BIAS_DEG", 3.0))
+    # start lining up on the exit once the remaining CCW sweep is under this
+    orca_exit_rad = math.radians(float(pget(params, "ORCA_EXIT_ANGLE_DEG", 25.0)))
+    orca_exit_tol = float(pget(params, "ORCA_EXIT_TOL_M", 30.0))
+    orca_ticks = [0]                                          # agent-steps run under ORCA
+
     ring_meter = bool(pget(params, "RING_METER", False))
     ring_wrap_follow = ring_meter or bool(pget(params, "RING_WRAP_FOLLOW", False))
     ring_merge_meter = ring_meter or bool(pget(params, "RING_MERGE_METER", False))
@@ -1062,6 +1477,7 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         seg = a.segs[idx]
         if a.is_patrol:
             a.seg_idx = idx; a.s_local = 0.0; a.status = "flying"
+            a.orca_xy = None; a.orca_v = None
             if a.launch_t is None:
                 a.launch_t = t
             return True
@@ -1103,6 +1519,8 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             occ.setdefault(seg.res, []).append((0.0, a))
         a.seg_idx = idx
         a.s_local = 0.0
+        a.orca_xy = None            # a fresh leg is always 1-D until the ORCA
+        a.orca_v = None             # pass re-seeds it inside a ring zone
         a.status = "flying"
         if a.launch_t is None:
             a.launch_t = t
@@ -1110,6 +1528,12 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
 
     def release_leg(res):
         leg_busy.pop(res, None)
+
+    def leave_orca(a):
+        """Drop the free 2-D state when an agent leaves a roundabout zone, so
+        it is a point on a lane centreline again everywhere else."""
+        a.orca_xy = None
+        a.orca_v = None
 
     def release_node(a):
         if a.held_node is not None and node_busy.get(a.held_node) is a:
@@ -1153,15 +1577,70 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
     min_approach_global = np.inf
     min_lane_gap_global = np.inf
     peak_concurrent = peak_backlog = max_agents_per_leg = 0
+    # ---- compliance against the SEPARATION STANDARD ------------------------
+    # The standard has two halves and they are measured separately:
+    #   HORIZONTAL  sep_floor metres between any two agents at the same flight
+    #               level, whatever corridor each is on (the 50 m lateral minimum);
+    #   LONGITUDINAL headway_s seconds in trail on a shared lane (the 30 s
+    #               in-corridor minimum), already enforced by the car-following
+    #               cap and reported as min_lane_gap_m.
+    sep_std = sep_floor
+    sep_violation_samples = 0          # same-level pairs closer than sep_std
+    sep_violation_frames = 0
+    peak_sep_violations = 0
+    worst_sep_m = np.inf
+    n_pair_samples = 0
+    # centreline / roundabout compliance: an agent must never be inside a ring's
+    # enclosed disk (that area is not a lane -- 06 raises its cost for the same
+    # reason). With ring travel on this must stay at 0.
+    _ring_c = np.array([net.rings[k][0] for k in net.rings], float) \
+        if net.rings else np.zeros((0, 2))
+    # With ORCA on, the ring is a 2-D manoeuvring AREA: using the disc is the
+    # intended behaviour, and only the kept-clear ISLAND at its centre is a
+    # violation. Without ORCA the ring is a 1-D circle and any incursion counts.
+    _ring_ri = np.array([(orca_island * net.rings[k][1]) if orca_rings
+                         else net.rings[k][2] for k in net.rings], float) \
+        if net.rings else np.zeros(0)
+    ring_cut_samples = 0               # agent positions inside a ring interior
+    ring_pos_samples = 0
+    sep_violation_log: list = []       # (t, aid_a, aid_b, gap_m, x, y, res_a, res_b, level)
+    # A drone PARKED at a dock is not traffic: it sits on the pad recharging, it
+    # is not airborne, and the separation standard is an AIRBORNE standard. Such
+    # agents are already outside `air` (on_leg() is False while dwelling), so
+    # they never enter the pairwise checks -- counted here so the exemption is
+    # auditable instead of incidental, and so the docked population is visible.
+    dock_exempt_samples = 0
+    peak_docked = 0
+    # Physical dock capacity. The scheduler books a pad before clearing a
+    # mission to launch, but the plan can drift, so the pads are enforced here
+    # too: an arriving drone that finds its dock full HOLDS on the last leg
+    # instead of landing on top of someone. dock_full_holds counts how often
+    # the strategic booking failed to protect the pad -- if it stays near zero
+    # the scheduling is doing its job and this is only a safety net.
+    dock_cap_rt = int(pget(params, "DOCK_CAPACITY", 0))
+    dock_now: dict = defaultdict(int)          # dock -> drones parked right now
+    dock_peak: dict = defaultdict(int)
+    dock_full_holds = 0
+
     conflict_pts_all: list = []        # every conflict location (red stars)
     total_conflict_samples = 0
     peak_conflicts = 0
     n_conflict_frames = 0
     next_sample = 0.0
-    n_active = 0                       # running count of launched-not-done agents
+    n_active = 0                       # airborne deliveries (docked ones excluded)
     active_agents: list[Agent] = []    # launched, not yet done
     all_agents = agents + patrols
-    arr = sorted(all_agents, key=lambda a: (a.arrival_t, a.priority))
+    # Release order. Without a schedule this is demand order (arrival, then
+    # priority). WITH a schedule it must be CTOT order: the launch gate below
+    # stops at the first agent that is not due yet, which is only sound if
+    # nothing behind it is due earlier. The scheduler assigns each mission the
+    # earliest slot on ITS OWN departure lane, so CTOTs are NOT monotone in
+    # demand order -- a mission on a quiet lane can be cleared before one queued
+    # ahead of it on a busy lane. Patrols carry no CTOT and keep arrival order.
+    def _release_key(a):
+        return (a.sched_t if (schedule_mode and a.sched_t is not None)
+                else a.arrival_t, a.priority)
+    arr = sorted(all_agents, key=_release_key)
     max_del_arr = max((a.arrival_t for a in agents), default=0.0)
     arr_i = 0
     waiting: deque = deque()           # arrived, not yet launched (FIFO by arrival)
@@ -1223,7 +1702,7 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         # ---- demand: patrols launch immediately at their scheduled time
         # (separate layer, exempt from the delivery concurrency cap so they
         # never pile up and fly out together); deliveries join the queue ----
-        while arr_i < len(arr) and arr[arr_i].arrival_t <= t:
+        while arr_i < len(arr) and _release_key(arr[arr_i])[0] <= t:
             a = arr[arr_i]; arr_i += 1
             if a.is_patrol:
                 if enter_leg(a, 0):
@@ -1249,6 +1728,9 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                         active_per_key[ag.origin] = active_per_key.get(ag.origin, 0) + 1
             while (waiting and n_active < max_concurrent and examined < slots * 3 + 40
                    and launched < per_tick):
+                if schedule_mode and waiting[0].sched_t is not None \
+                        and waiting[0].sched_t > t:
+                    break          # queue is in CTOT order: nothing else is due yet
                 a = waiting.popleft(); n_waiting -= 1; examined += 1
                 if dcb_mode and not a.is_patrol and \
                         active_per_key.get(a.origin, 0) >= dcb_cap:
@@ -1276,6 +1758,99 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         # nearest-to-end first, so a leg frees up before the follower asks
         movers = [a for a in active_agents if a.on_leg()]
         movers.sort(key=lambda a: (a.cur_seg().length - a.s_local, a.priority))
+
+        # ---- ORCA inside the roundabout zones -------------------------------
+        # A widened ring is a 2-D manoeuvring area, not a 1-D circle, so agents
+        # inside one are advanced by reciprocal collision avoidance rather than
+        # by car-following on an arc. Each agent's PREFERRED velocity is the
+        # roundabout rule -- circulate CCW at cruise until its exit bearing
+        # comes up, then peel off toward the exit -- and ORCA returns the
+        # closest velocity that keeps every pair >= 2*orca_radius apart and
+        # everyone between the island and the ring's outer edge. The 1-D
+        # movement loop below skips these agents (`orca_done`).
+        orca_done: dict = {}          # id(agent) -> metres advanced this tick
+        if orca_rings and net.rings:
+            by_ring: dict = defaultdict(list)
+            for a in movers:
+                sg = a.cur_seg()
+                if sg.ring_circ > 0.0 and not a.is_patrol:
+                    by_ring[sg.res.split("#")[0]].append(a)
+            for rbt, grp in by_ring.items():
+                if rbt not in net.rings:
+                    continue
+                c, r_out, _r_in = net.rings[rbt]
+                P, V, PR, RD, MS = [], [], [], [], []
+                for a in grp:
+                    sg = a.cur_seg()
+                    if a.orca_xy is None:                  # entering the zone
+                        a.orca_xy = np.asarray(sg.xy[0], float).copy()
+                        d0 = sg.xy[min(1, len(sg.xy) - 1)] - sg.xy[0]
+                        n0 = float(np.hypot(*d0)) or 1.0
+                        a.orca_v = (d0 / n0) * a.speed
+                    pos = a.orca_xy
+                    exit_xy = np.asarray(sg.xy[-1], float)
+                    rel = pos - c
+                    rad = float(np.hypot(*rel)) or 1e-9
+                    th = math.atan2(rel[1], rel[0])
+                    th_x = math.atan2(exit_xy[1] - c[1], exit_xy[0] - c[0])
+                    sweep = (th_x - th) % (2.0 * math.pi)   # CCW sweep still to fly
+                    v_cruise = a.speed * (slowness_at(pos[0], pos[1])
+                                          if cost_map is not None else 1.0)
+                    v_cruise = max(v_cruise, 0.5)
+                    if sweep <= orca_exit_rad:
+                        d = exit_xy - pos                   # line up on the exit
+                        nd = float(np.hypot(*d)) or 1e-9
+                        pref = d / nd * v_cruise
+                    else:
+                        tang = np.array([-math.sin(th), math.cos(th)])   # CCW
+                        radial = (c + (r_out / rad) * rel - pos)         # hold the ring
+                        nr = float(np.hypot(*radial))
+                        pref = tang * v_cruise
+                        if nr > 1e-6:
+                            pref = pref + (radial / nr) * min(nr / max(orca_tau, 1e-6),
+                                                              0.35 * v_cruise)
+                        npf = float(np.hypot(*pref)) or 1e-9
+                        pref = pref / npf * v_cruise
+                    P.append(pos); V.append(a.orca_v); PR.append(pref)
+                    RD.append(orca_radius); MS.append(max(a.speed, v_cruise))
+                if not P:
+                    continue
+                bounds = [(c, r_out + orca_half_w - orca_radius, True),
+                          (c, orca_island * r_out + orca_radius, False)]
+                NV = orca_step(np.array(P), np.array(V), np.array(PR), RD,
+                               np.array(MS), orca_tau, dt, bounds=bounds,
+                               bias_deg=orca_bias_deg)
+                for a, nv in zip(grp, NV):
+                    sg = a.cur_seg()
+                    step = nv * dt
+                    a.orca_xy = a.orca_xy + step
+                    a.orca_v = nv
+                    adv = float(np.hypot(*step))
+                    if adv > 1e-9:
+                        moved = True
+                    # s_local mirrors the CCW sweep completed, so lane occupancy,
+                    # the metrics and the HTML keep working unchanged. Kept
+                    # MONOTONE and capped just below the arc length: the raw
+                    # sweep is an angle mod 2*pi, so a hair of backward drift at
+                    # the entry wraps it to ~2*pi and would read as "arrived".
+                    # Only the explicit exit-proximity test below ends the arc.
+                    rel = a.orca_xy - c
+                    th = math.atan2(rel[1], rel[0])
+                    x0 = np.asarray(sg.xy[0], float) - c
+                    done = (th - math.atan2(x0[1], x0[0])) % (2.0 * math.pi)
+                    full = max(sg.length, 1e-6)
+                    prog = done / (2.0 * math.pi) * (2.0 * math.pi * r_out)
+                    a.s_local = min(max(a.s_local, prog), 0.999 * full)
+                    if adv < 0.2 * a.speed * dt:
+                        a.holding = True
+                        hold_cause["leader"] += 1
+                    orca_ticks[0] += 1
+                    # reached the exit -> hand back to the 1-D corridor model
+                    if float(np.hypot(*(a.orca_xy - np.asarray(sg.xy[-1], float)))) \
+                            <= orca_exit_tol:
+                        a.s_local = full
+                    orca_done[id(a)] = adv
+
         for a in movers:
             seg = a.cur_seg()
             L = seg.length
@@ -1338,8 +1913,17 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                     frac = room / band
                     frac = 0.0 if frac < 0.0 else (1.0 if frac > 1.0 else frac)
                     desired = a.s_local + eff_speed * frac * dt
-            new_s = max(a.s_local, min(desired, cap))
-            adv = new_s - a.s_local
+            _oadv = orca_done.get(id(a))
+            if _oadv is not None:
+                # the ORCA pass already flew this agent in 2-D and set s_local.
+                # Fall through with no further 1-D motion so the battery drain
+                # and the leg hand-off below run exactly as for everyone else.
+                new_s, adv = a.s_local, _oadv
+                desired = L if a.s_local >= L - 1e-6 else new_s
+                eff_speed = adv / dt if dt > 0 else 0.0
+            else:
+                new_s = max(a.s_local, min(desired, cap))
+                adv = new_s - a.s_local
             if adv > 1e-9 and not a.is_patrol:
                 moved = True   # only delivery progress resets the gridlock timer
             a.dist_m += adv
@@ -1393,11 +1977,19 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                         release_node(a)
                     a.status = "done"; a.complete_t = t; moved = True
                 elif a.kinds[nxt] == "dwell":
+                    if dock_cap_rt and dock_now[a.dest] >= dock_cap_rt:
+                        a.holding = True           # dock full: wait on the leg
+                        dock_full_holds += 1
+                        if not a.is_patrol:
+                            hold_cause["block"] += 1
+                        continue
                     if not a.is_patrol:
                         release_leg(cur_res)
                     if node_mutex:
                         release_node(a)
                     a.seg_idx = nxt; a.status = "dwell"; a.n_charges += 1
+                    dock_now[a.dest] += 1
+                    dock_peak[a.dest] = max(dock_peak[a.dest], dock_now[a.dest])
                     a.dwell_left = min_dest_idle   # mandatory idle before return
                 else:
                     if enter_leg(a, nxt):
@@ -1410,17 +2002,26 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                             hold_cause["block"] += 1
 
         # ---- dock charging: recharge to CHARGE_TARGET, then depart ----
+        n_air_now = n_active                    # airborne right now (docked excluded)
         for a in active_agents:
             if a.status == "dwell":
-                if a.dwell_left > 0.0:                       # mandatory idle (>= 5 min)
+                if a.dwell_left > 0.0:                       # mandatory idle
                     a.dwell_left -= dt
                 charging = a.battery_wh < charge_target - 1e-6
                 if charging:                                 # still charging
                     a.battery_wh = min(battery_cap, a.battery_wh + charge_power * dt / 3600.0)
                     a.charge_s += dt
-                # depart only once BOTH the min idle has elapsed AND charged,
-                # and a return lane is free; else parked (no hover drain)
-                elif a.dwell_left <= 0.0 and enter_leg(a, a.seg_idx + 1):
+                # depart only once the idle has elapsed AND the battery is full
+                # AND a return lane is free; else parked (no hover drain).
+                # Leaving the pad makes it AIRBORNE again, so it has to take an
+                # airborne slot -- only a drone that is still parked is exempt
+                # from the cap. Without this the return legs bypass the gate and
+                # the observed peak drifts above MAX_CONCURRENT.
+                elif a.dwell_left <= 0.0 and n_air_now < max_concurrent \
+                        and enter_leg(a, a.seg_idx + 1):
+                    if dock_cap_rt:
+                        dock_now[a.dest] = max(0, dock_now[a.dest] - 1)
+                    n_air_now += 1
                     moved = True
 
         # arrived-but-not-launched deliveries are blocked on the launch queue
@@ -1444,8 +2045,15 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         done_now = [a for a in active_agents if a.status in ("done", "dead")]
         if done_now:
             active_agents = [a for a in active_agents if a.status not in ("done", "dead")]
-            n_active -= sum(1 for a in done_now if not a.is_patrol)  # patrols aren't capped
 
+        # MAX_CONCURRENT is an AIRBORNE cap, so recompute it from who is actually
+        # flying. A drone parked at a dock is not traffic -- it holds no corridor,
+        # meets no one, and is exempt from the separation checks -- so it must not
+        # hold an airborne slot either. With a 30-minute dock stop and ~400 round
+        # trips this is not a detail: counting parked drones against the cap would
+        # idle most of the airborne budget on drones sitting on pads.
+        n_active = sum(1 for a in active_agents
+                       if not a.is_patrol and a.status != "dwell")
         peak_concurrent = max(peak_concurrent, n_active)
         peak_backlog = max(peak_backlog, n_waiting)
         if moved or n_active == 0:
@@ -1457,6 +2065,9 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         # ---- sampling ----
         if t >= next_sample - 1e-9:
             air = [a for a in active_agents if a.on_leg()]
+            n_docked = sum(1 for a in active_agents if a.status == "dwell")
+            dock_exempt_samples += n_docked          # excluded from every check below
+            peak_docked = max(peak_docked, n_docked)
             if air:
                 xy = np.array([a.position(obj_xy) for a in air])
                 outb = np.array([(a.is_patrol and 2) or (1 if a.outbound() else 0) for a in air])
@@ -1490,6 +2101,29 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                 same_level = (dlev[iu[0]] == dlev[iu[1]])
                 approach = float(dij[same_level].min()) if same_level.any() else np.inf
                 min_approach_global = min(min_approach_global, approach)
+                # HORIZONTAL separation standard: every same-level pair, no
+                # same-leg exemption -- the two lanes of a leg are built >= 50 m
+                # apart, so a compliant pair passes this test on its own merit.
+                n_pair_samples += int(same_level.sum())
+                bad_m = (dij < sep_std) & same_level
+                bad = int(bad_m.sum())
+                if bad:
+                    sep_violation_samples += bad
+                    sep_violation_frames += 1
+                    peak_sep_violations = max(peak_sep_violations, bad)
+                    worst_sep_m = min(worst_sep_m, float(dij[bad_m].min()))
+                    # log WHERE each loss of separation happened, so the hot
+                    # spots can be read off instead of guessed at
+                    if len(sep_violation_log) < 20000:
+                        dres = [a.cur_seg().res for a in dair]
+                        bi, bj = iu[0][bad_m], iu[1][bad_m]
+                        for u in range(len(bi)):
+                            ia, ib = int(bi[u]), int(bj[u])
+                            mx, my = 0.5 * (dxy[ia] + dxy[ib])
+                            sep_violation_log.append(
+                                (t, dair[ia].aid, dair[ib].aid,
+                                 float(d[ia, ib]), float(mx), float(my),
+                                 dres[ia], dres[ib], int(dlev[ia])))
                 thr = (conflict_time * np.maximum(dv[:, None], dv[None, :]))[iu]
                 # NOT a conflict if: same leg (spatially separated lanes) OR on a
                 # different flight level (vertically separated)
@@ -1498,6 +2132,13 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
                 if cm.any():
                     ii, jj = iu[0][cm], iu[1][cm]
                     conflict_pts = 0.5 * (dxy[ii] + dxy[jj])
+            # centreline compliance: no agent may be inside a roundabout's
+            # enclosed disk (it is not a lane -- agents must circulate the ring)
+            if len(_ring_c) and len(dxy):
+                ring_pos_samples += len(dxy)
+                dcen = np.hypot(dxy[:, None, 0] - _ring_c[None, :, 0],
+                                dxy[:, None, 1] - _ring_c[None, :, 1])
+                ring_cut_samples += int((dcen < (_ring_ri[None, :] - 1.0)).any(axis=1).sum())
             nconf = len(conflict_pts)
             total_conflict_samples += nconf
             peak_conflicts = max(peak_conflicts, nconf)
@@ -1516,6 +2157,13 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
             for a in air:
                 if not a.is_patrol:
                     seg = a.cur_seg()
+                    # Agents in an ORCA zone are separated in 2-D, not in trail:
+                    # their s_local is a sweep ANGLE, so two agents at the same
+                    # bearing but different radii read a 0 m in-trail gap while
+                    # being properly clear. Excluded here and measured by the
+                    # horizontal standard instead.
+                    if orca_rings and seg.ring_circ > 0.0:
+                        continue
                     lane_s[seg.res].append(a.s_local + seg.s_offset)
             for ss in lane_s.values():
                 max_agents_per_leg = max(max_agents_per_leg, len(ss))
@@ -1548,6 +2196,27 @@ def simulate(net: Network, agents: list[Agent], patrols: list[Agent], params):
         "min_lane_gap_m": None if not np.isfinite(min_lane_gap_global) else min_lane_gap_global,
         "min_approach_m": None if not np.isfinite(min_approach_global) else min_approach_global,
         "effective_separation_m": sep,
+        "sep_standard_h_m": sep_std,
+        "sep_standard_v_s": headway_s,
+        "sep_violation_samples": sep_violation_samples,
+        "sep_violation_frames": sep_violation_frames,
+        "peak_sep_violations": peak_sep_violations,
+        "worst_sep_m": None if not np.isfinite(worst_sep_m) else worst_sep_m,
+        "n_pair_samples": n_pair_samples,
+        "ring_cut_samples": ring_cut_samples,
+        "ring_pos_samples": ring_pos_samples,
+        "sep_violation_log": sep_violation_log,
+        "dock_exempt_samples": dock_exempt_samples,
+        "peak_docked": peak_docked,
+        "dock_capacity": dock_cap_rt,
+        "dock_peak_per_dock": dict(dock_peak),
+        "dock_full_holds": dock_full_holds,
+        "hold_cause": dict(hold_cause),
+        "schedule_mode": schedule_mode,
+        "orca_rings": orca_rings,
+        "orca_agent_steps": orca_ticks[0],
+        "orca_radius_m": orca_radius,
+        "orca_tau_s": orca_tau,
         "patrol_laps": patrol_total_laps + sum(a.laps for a in patrols if not a.done),
         "patrol_sorties": patrol_total_sorties,
         "n_legs_dir": 2 * int(net.lanes["leg_id"].nunique()),
@@ -1738,7 +2407,7 @@ def plot_timeline(timeline, sep_eff, out_png: Path, peak_concurrent=None):
     n_active = np.array([r[6] for r in timeline])
     fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(12, 8), sharex=True)
     ax1.plot(t, n_wait, color="#b2182b", lw=1.2, label="backlog (waiting for a leg)")
-    ax1.plot(t, n_active, color="#2166ac", label="airborne (concurrent)")
+    ax1.plot(t, n_active, color="#2166ac", label="airborne (concurrent, docked excluded)")
     ax1.plot(t, n_hold, color="#d95f02", lw=1, alpha=0.8, label="holding at a node")
     if peak_concurrent is not None:
         ax1.axhline(peak_concurrent, color="#2166ac", ls="--", lw=1,
@@ -1755,6 +2424,130 @@ def plot_timeline(timeline, sep_eff, out_png: Path, peak_concurrent=None):
     ax2.set_ylim(bottom=0)
     ax2.legend(loc="upper right")
     ax2.grid(alpha=0.3)
+    fig.tight_layout()
+    fig.savefig(out_png, dpi=130)
+    plt.close(fig)
+
+
+# binding-constraint palette, shared by the Gantt and the rank plot
+_BIND_COLOR = {
+    "ready":            "#7fbf7b",   # cleared at its arrival time
+    "corridor_headway": "#4a6fa5",   # 30 s in-trail spacing on its departure lane
+    "airborne_cap":     "#f0a860",   # MAX_CONCURRENT airborne
+    "origin_cap":       "#c07de0",   # per-origin fair share
+    "dock_pad":         "#d7503a",   # no free pad at the predicted arrival
+}
+_BIND_LABEL = {
+    "ready":            "ready (no delay)",
+    "corridor_headway": "corridor headway (30 s on its departure lane)",
+    "airborne_cap":     "airborne cap (MAX_CONCURRENT)",
+    "origin_cap":       "origin fair share",
+    "dock_pad":         "dock pad unavailable on arrival",
+}
+
+
+def plot_schedule(sched, params, out_png: Path):
+    """FIRST-COME-FIRST-SERVED departure schedule.
+
+    Missions are ranked by arrival (all at t=0 here, so rank = queue position)
+    and served in that order: FCFS decides who gets FIRST PICK of a slot. It
+    does NOT produce a monotone departure order -- each mission contends for
+    its own departure lane and its own destination dock, so one bound for a
+    quiet lane and an empty dock is cleared long before one ahead of it in the
+    queue that is bound for a busy one. The CTOT scatter shows that spread
+    directly. Colour says WHICH constraint set each slot, which is the whole
+    explanation of the schedule's shape."""
+    from matplotlib.collections import LineCollection
+    rows = sched.get("rows") or []
+    if not rows:
+        return
+    H = 3600.0
+    rank = np.array([r["fcfs_rank"] for r in rows], float)
+    arr = np.array([r["arrival_s"] for r in rows]) / H
+    ctot = np.array([r["ctot_s"] for r in rows]) / H
+    eta = np.array([r["eta_s"] for r in rows]) / H
+    hold = np.array([r["dock_hold_s"] for r in rows]) / H
+    bind = [r["binding"] for r in rows]
+    cols = [_BIND_COLOR.get(b, "#999") for b in bind]
+
+    fig = plt.figure(figsize=(15, 11))
+    gs = fig.add_gridspec(3, 2, height_ratios=[2.4, 1, 1], hspace=0.34, wspace=0.22)
+
+    # ---- (1) Gantt: one row per mission, in FCFS order ----
+    ax = fig.add_subplot(gs[0, :])
+    ax.add_collection(LineCollection(
+        [[(a, k), (c, k)] for a, c, k in zip(arr, ctot, rank)],
+        colors="#c8ced8", linewidths=0.8, label="_"))
+    ax.add_collection(LineCollection(
+        [[(c, k), (c + e, k)] for c, e, k in zip(ctot, eta, rank)],
+        colors="#2166ac", linewidths=0.8))
+    rt = hold > 0
+    if rt.any():
+        ax.add_collection(LineCollection(
+            [[(c + e, k), (c + e + h, k)]
+             for c, e, h, k in zip(ctot[rt], eta[rt], hold[rt], rank[rt])],
+            colors="#e08214", linewidths=0.8))
+        ax.add_collection(LineCollection(
+            [[(c + e + h, k), (c + 2 * e + h, k)]
+             for c, e, h, k in zip(ctot[rt], eta[rt], hold[rt], rank[rt])],
+            colors="#1f8a4c", linewidths=0.8))
+    ax.scatter(ctot, rank, s=3, c="#111", linewidths=0, zorder=5)
+    ax.set_xlim(0, float((ctot + 2 * eta + hold).max()) * 1.02)
+    ax.set_ylim(-5, len(rows) + 5)
+    ax.set_xlabel("time (h)"); ax.set_ylabel("mission, in FCFS arrival order")
+    ax.set_title("First-come-first-served departure schedule "
+                 f"({len(rows)} missions; black dots are the assigned CTOTs)")
+    ax.grid(alpha=0.25)
+    ax.legend(handles=[
+        Line2D([], [], color="#c8ced8", lw=3, label="waiting on the ground (arrival → CTOT)"),
+        Line2D([], [], color="#2166ac", lw=3, label="outbound flight (ETA priced by slowness)"),
+        Line2D([], [], color="#e08214", lw=3, label="parked at the dock (10 min pad + 30 min charge)"),
+        Line2D([], [], color="#1f8a4c", lw=3, label="return flight"),
+        Line2D([], [], marker="o", ls="", ms=3, color="#111",
+               label="CTOT (FCFS = first pick of a slot, not a monotone order)"),
+    ], loc="lower right", fontsize=8, framealpha=0.92)
+
+    # ---- (2) what set each slot ----
+    ax = fig.add_subplot(gs[1, 0])
+    ax.scatter(ctot, rank, s=2, c=cols, linewidths=0)
+    ax.set_xlabel("CTOT (h)"); ax.set_ylabel("FCFS rank")
+    ax.set_title("Binding constraint per mission", fontsize=10)
+    ax.grid(alpha=0.25)
+    seen = [b for b in _BIND_COLOR if b in set(bind)]
+    ax.legend(handles=[Line2D([], [], marker="o", ls="", ms=5,
+                              color=_BIND_COLOR[b], label=_BIND_LABEL[b]) for b in seen],
+              fontsize=7.5, loc="upper left", framealpha=0.92)
+
+    # ---- (3) delay distribution by cause ----
+    ax = fig.add_subplot(gs[1, 1])
+    delay = np.array([r["delay_s"] for r in rows]) / 60.0
+    for b in seen:
+        d = delay[np.array([x == b for x in bind])]
+        if len(d):
+            ax.hist(d, bins=40, alpha=0.75, color=_BIND_COLOR[b], label=f"{_BIND_LABEL[b]} ({len(d)})")
+    ax.set_xlabel("ground delay (min)"); ax.set_ylabel("missions")
+    ax.set_title(f"Ground delay by cause (mean {delay.mean():.0f} min)", fontsize=10)
+    ax.legend(fontsize=7); ax.grid(alpha=0.25)
+
+    # ---- (4) booked pad occupancy per dock ----
+    ax = fig.add_subplot(gs[2, :])
+    prof = sched.get("dock_profile") or {}
+    cap = int(sched.get("dock_capacity", 0))
+    bin_s = float(sched.get("bin_s", 5.0))
+    for d, series in sorted(prof.items()):
+        y = np.asarray(series, float)
+        nz = np.nonzero(y)[0]
+        if not len(nz):
+            continue
+        hi = min(len(y), int(nz[-1]) + 20)
+        ax.plot(np.arange(hi) * bin_s / H, y[:hi], lw=1.0, label=d)
+    if cap:
+        ax.axhline(cap, color="#d7503a", ls="--", lw=1.4, label=f"capacity {cap} pads")
+    ax.set_xlabel("time (h)"); ax.set_ylabel("pads booked")
+    ax.set_title("Dock pad occupancy as BOOKED by the scheduler "
+                 "(a mission only launches once its pad is reserved)", fontsize=10)
+    ax.legend(fontsize=7, ncol=5); ax.grid(alpha=0.25)
+
     fig.tight_layout()
     fig.savefig(out_png, dpi=130)
     plt.close(fig)
@@ -1872,7 +2665,8 @@ def make_animation(net: Network, frames, params, sep_eff, out_gif: Path):
     plt.close(fig)
 
 
-def write_html(net: Network, frames, params, sep_eff, out_html: Path):
+def write_html(net: Network, frames, params, sep_eff, out_html: Path,
+               velocity: dict | None = None):
     """Self-contained interactive HTML animation: the corridor network on
     a <canvas> with the agents moving along it. Play/pause, speed and a
     time scrubber; all data embedded inline so the file opens offline."""
@@ -1962,6 +2756,12 @@ def write_html(net: Network, frames, params, sep_eff, out_html: Path):
             "map_h_m": int(round(bbox[3] - bbox[1])),
             "shift_h": float(pget(params, "SHIFT_HOURS", 1.0)),
             "speed_classes": [int(c) for c in cls_desc],
+            # ACHIEVED velocity over the completed missions: distance flown
+            # divided by time taken. door_to_door spans launch -> complete so it
+            # carries holds, cost-map slow-downs and the dock stop; airborne
+            # divides by airborne time only. The gap between them is the time
+            # the fleet spent parked.
+            "velocity": velocity or {},
         },
         "bbox": bbox, "lanes": lanes, "rings": rings, "tn": tn_pts, "objs": objs,
         "times": times, "frames": fdata, "conflicts": cdata,
@@ -2304,7 +3104,13 @@ document.getElementById('meta').innerHTML =
   `<div class="stat"><span>Map size</span><b>${DATA.meta.map_w_m}&times;${DATA.meta.map_h_m} m</b></div>`+
   `<div class="stat"><span>Arrival window</span><b>${DATA.meta.shift_h} h</b></div>`+
   `<div class="stat"><span>Separation</span><b>&ge;${DATA.meta.headway_s}s (${DATA.meta.gap_min_m}&ndash;${DATA.meta.gap_max_m} m)</b></div>`+
-  `<div class="stat"><span>Frames</span><b>${N}</b></div>`;
+  `<div class="stat"><span>Frames</span><b>${N}</b></div>`+
+  (DATA.meta.velocity && DATA.meta.velocity.door_to_door_kmh ?
+    `<div class="stat"><span>Velocity (door&#8209;to&#8209;door)</span><b>${DATA.meta.velocity.door_to_door_kmh.toFixed(1)} km/h</b></div>`+
+    `<div class="stat"><span>Velocity (airborne)</span><b>${DATA.meta.velocity.airborne_kmh.toFixed(1)} km/h</b></div>`+
+    `<div class="stat"><span>Nominal cruise</span><b>${DATA.meta.velocity.nominal_cruise_kmh.toFixed(1)} km/h</b></div>`+
+    `<div class="stat"><span>Flown / time</span><b>${DATA.meta.velocity.total_distance_km.toFixed(0)} km / ${DATA.meta.velocity.total_time_h.toFixed(1)} h</b></div>`
+    : '');
 
 // speed-class shape legend (circle / triangle / square = fast .. slow)
 const SHAPES=['&#9679;','&#9650;','&#9632;'];
@@ -2436,6 +3242,14 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
                  "speed_kmh": float(m.speed_kmh), "launch_s": float(m.launch_s),
                  "complete_s": float(m.complete_s), "flight_time_s": float(m.flight_time_s),
                  "route_len_m": float(m.route_len_m), "flown_m": float(m.flown_m),
+                 # achieved velocity: flown / mission time, and flown / airborne
+                 # time. The difference between them is the dock stop.
+                 "velocity_kmh": None if pd.isna(getattr(m, "velocity_kmh", None))
+                                 else float(m.velocity_kmh),
+                 "air_velocity_kmh": None if pd.isna(getattr(m, "air_velocity_kmh", None))
+                                     else float(m.air_velocity_kmh),
+                 "dock_idle_s": 0.0 if pd.isna(getattr(m, "dock_idle_s", None))
+                                else float(m.dock_idle_s),
                  "n_holds": int(m.n_holds), "hold_s": float(m.hold_s),
                  "energy_wh": float(m.energy_wh), "battery_end_pct": float(m.battery_end_pct),
                  "completed": bool(m.completed), "battery_dead": bool(m.battery_dead)}
@@ -2447,7 +3261,9 @@ def write_agent_routes(net: Network, frames, params, out_dir: Path, missions_csv
                  "speed_kmh": patrol_kmh if is_patrol else 0.0,
                  "launch_s": times[k0] if fo else 0.0, "complete_s": times[k1] if fo else 0.0,
                  "flight_time_s": (times[k1] - times[k0]) if fo else 0.0, "route_len_m": 0.0,
-                 "flown_m": 0.0, "n_holds": 0, "hold_s": 0.0, "energy_wh": 0.0,
+                 "flown_m": 0.0, "velocity_kmh": None, "air_velocity_kmh": None,
+                 "dock_idle_s": 0.0,
+                 "n_holds": 0, "hold_s": 0.0, "energy_wh": 0.0,
                  "battery_end_pct": 0.0, "completed": True, "battery_dead": False}
         F = {"aid": int(aid), "focal": fo, "stats": s,
              "fcls": scls(s["speed_kmh"])}   # focal speed class -> its required gap
@@ -2678,6 +3494,9 @@ document.getElementById('info').innerHTML='<h2>Mission</h2>'+
   row('type',S.kind)+row('route',S.origin+' &rarr; '+S.dest)+row('speed',S.speed_kmh.toFixed(0)+' km/h')+
   row('launch',(S.launch_s/60).toFixed(1)+' min')+row('flight time',(S.flight_time_s/60).toFixed(1)+' min')+
   row('route length',S.route_len_m.toFixed(0)+' m')+row('flown',S.flown_m.toFixed(0)+' m')+
+  (S.velocity_kmh!=null?row('velocity (door-to-door)',(+S.velocity_kmh).toFixed(1)+' km/h'):'')+
+  (S.air_velocity_kmh!=null?row('velocity (airborne)',(+S.air_velocity_kmh).toFixed(1)+' km/h'):'')+
+  (S.dock_idle_s?row('dock stop',(S.dock_idle_s/60).toFixed(1)+' min'):'')+
   row('holds',S.n_holds+' ('+(S.hold_s/60).toFixed(1)+' min)')+row('energy',S.energy_wh.toFixed(0)+' Wh')+
   row('battery end',(S.battery_end_pct).toFixed(0)+' %')+
   row('outcome', S.completed?'completed':(S.battery_dead?'battery dead':'unfinished'));
@@ -2899,8 +3718,21 @@ def write_missions(agents, params, out_csv: Path):
             "complete_s": None if a.complete_t is None else round(a.complete_t, 1),
             "flight_time_s": None if (a.complete_t is None or a.depart_t is None)
                              else round(a.complete_t - a.depart_t, 1),
-            "speed_kmh": a.speed_kmh,
+            "speed_kmh": a.speed_kmh,                # nominal cruise of its class
+            # ACHIEVED velocity = total distance flown / total mission time
+            # (launch -> complete). This is the door-to-door figure: it carries
+            # every hold, every slow-down under the cost-map and the dock stop,
+            # so it is always below the class cruise speed. `air_velocity_kmh`
+            # divides by airborne time only, which isolates how much of the loss
+            # is flight-phase slow-down rather than time parked at a dock.
+            "velocity_kmh": None if (a.complete_t is None or a.depart_t is None
+                                     or a.complete_t <= a.depart_t)
+                            else round(3.6 * a.dist_m / (a.complete_t - a.depart_t), 2),
+            "air_velocity_kmh": None if a.air_s <= 0
+                                else round(3.6 * a.dist_m / a.air_s, 2),
             "air_time_s": round(a.air_s, 1),
+            "dock_idle_s": None if (a.complete_t is None or a.depart_t is None)
+                           else round(max(0.0, (a.complete_t - a.depart_t) - a.air_s), 1),
             "route_len_m": round(a.route_len, 1),
             "flown_m": round(a.dist_m, 1),
             "hold_s": round(a.hold_s, 1),
@@ -2984,7 +3816,22 @@ def main() -> None:
     print("=" * 66)
 
     ring_travel = bool(pget(params, "RING_TRAVEL", False))
-    lane_gap = float(pget(params, "ROUNDABOUT_LANE_GAP_M", 50.0))
+    # the ring lane gap must match the geometry stage 05 BUILT, not a local
+    # default: 05 with ROUNDABOUT_LANE_GAP_M = 0 makes a single ring, and
+    # modelling a phantom inner lane here would put agents on a circle the
+    # network does not have. Read 05's own params when they are reachable.
+    lane_gap = pget(params, "ROUNDABOUT_LANE_GAP_M", None)
+    if lane_gap is None:
+        cpf = THIS_DIR / str(pget(params, "CORRIDOR_PARAM_FILE", ""))
+        lane_gap = 50.0
+        if cpf.is_file():
+            ns: dict = {}
+            try:
+                exec(compile(cpf.read_text(encoding="utf-8"), str(cpf), "exec"), {}, ns)
+                lane_gap = float(ns.get("ROUNDABOUT_LANE_GAP_M", 50.0))
+            except Exception:
+                pass
+    lane_gap = float(lane_gap)
     ring_right_hand = bool(pget(params, "RING_RIGHT_HAND", True))
     net = Network(corridor_dir, ring_travel=ring_travel, lane_gap=lane_gap,
                   ring_right_hand=ring_right_hand)
@@ -2992,15 +3839,48 @@ def main() -> None:
           f"{net.lanes['leg_id'].nunique()} legs, "
           f"{len(net._routes)} pair routes")
     if ring_travel:
-        rule = ("right-hand (one-way CCW)" if ring_right_hand else "shorter-arc")
-        print(f"Ring travel   : ON -- {len(net.rings)} roundabouts, {rule}; agents "
-              f"circulate the outer RED ring (forward) / inner BLUE ring (backward), "
-              f"lane gap {lane_gap:.0f} m")
+        rule = ("right-hand (one-way CCW, exit right)" if ring_right_hand
+                else "shorter-arc")
+        lanes_desc = ("ONE shared ring lane (lane gap 0)" if lane_gap <= 0
+                      else f"outer ring (forward) / inner ring (backward), "
+                           f"lane gap {lane_gap:.0f} m")
+        print(f"Ring travel   : ON -- {len(net.rings)} roundabouts, {rule}; "
+              f"{lanes_desc}; legs clipped at the ring boundary")
     else:
         print("Ring travel   : OFF -- legs meet ring nodes directly (no ring arcs)")
 
     rng = np.random.default_rng(int(pget(params, "SIM_SEED", 12345)))
     agents, patrols = build_fleet(net, params, rng)
+    sched_info = None
+    _slw = None
+    if bool(pget(params, "SCHEDULE_MODE", False)):
+        # the ETA that books a dock pad must price the route the way the agent
+        # will actually fly it: true velocity = slowness * cruise
+        _cm = load_costmap(pget(params, "COST_MAP_FILE", ""))
+        if _cm is not None:
+            _g, _x0, _y0, _rs, _nx, _ny = _cm
+
+            def _slw(x, y):
+                return float(_g[min(max(int((y - _y0) / _rs), 0), _ny - 1),
+                                min(max(int((x - _x0) / _rs), 0), _nx - 1)])
+        sched_info = schedule_departures(net, agents, params, slowness_at=_slw)
+        print(f"Scheduling    : ON -- {sched_info['scheduled']} CTOTs over "
+              f"{sched_info['n_departure_lanes']} departure lanes; "
+              f"{sched_info['headway_s']:.0f} s corridor headway, origin cap "
+              f"{sched_info['origin_cap']}; {sched_info['n_delayed']} missions "
+              f"delayed (mean {sched_info['mean_delay_s']/60.0:.1f} min), "
+              f"last CTOT {sched_info['span_h']:.2f} h")
+        if sched_info["dock_capacity"]:
+            print(f"Dock booking  : {sched_info['dock_capacity']} pads/dock x "
+                  f"{sched_info['dock_hold_s']/60:.0f} min stop; "
+                  f"{sched_info['n_parking_missions']} parking missions, mean ETA "
+                  f"{sched_info['mean_eta_to_dock_s']/60:.1f} min"
+                  + (" (slowness-priced)" if _slw is not None else " (no cost-map)")
+                  + f"; {sched_info['n_pushed_for_dock']} pushed back for a pad "
+                    f"(mean {sched_info['mean_dock_push_s']/60:.1f} min)")
+    else:
+        print("Scheduling    : OFF -- reactive launch metering "
+              "(LAUNCH_SPACING_S + DCB)")
     n_rt = sum(a.round_trip for a in agents)
     n_backup = sum(a.contingency == "backup" for a in agents)
     n_return = sum(a.contingency == "return" for a in agents)
@@ -3058,11 +3938,52 @@ def main() -> None:
     print(f"Completed     : {len(completed)}/{len(agents)} deliveries by "
           f"t={stats['sim_end_t']/3600:.2f} h  ({n_dead} battery-dead, {n_unfinished} unfinished)")
     print(f">>> MAX SIMULTANEOUS AGENTS (peak concurrent) = {stats['peak_concurrent']}")
-    print(f"Separation    : >= {headway:.0f} s time-headway "
-          f"({headway*8.3:.0f} m at 30km/h .. {headway*16.7:.0f} m at 60km/h); "
-          f"min same-lane gap {lane_gap if lane_gap is None else round(lane_gap,1)} m")
-    print(f"Battery/dock  : recharge to {float(pget(params,'CHARGE_TARGET_PCT',0.9))*100:.0f}% before "
-          f"departing; mean charge {mean_charge/60:.1f} min; {n_dead} ran flat mid-air")
+    _h_std = stats["sep_standard_h_m"]
+    _nviol, _npair = stats["sep_violation_samples"], stats["n_pair_samples"]
+    print(f"Separation std: {_h_std:.0f} m horizontal (any corridor, same level) + "
+          f"{headway:.0f} s longitudinal (in trail, same corridor)")
+    print(f"  longitudinal: min same-lane gap "
+          f"{lane_gap if lane_gap is None else round(lane_gap,1)} m "
+          f"(required {headway*8.3:.0f} m at 30km/h .. {headway*16.7:.0f} m at 60km/h)")
+    print(f"  horizontal  : min observed {stats['min_approach_m']:.1f} m over "
+          f"{_npair} same-level pair-samples -> "
+          + (f"OK, no pair under {_h_std:.0f} m"
+             if _nviol == 0 else
+             f"{_nviol} violating pair-samples "
+             f"({100.0*_nviol/max(_npair,1):.3f}%), worst {stats['worst_sep_m']:.1f} m, "
+             f"peak {stats['peak_sep_violations']} at once"))
+    if stats["orca_rings"]:
+        print(f"  ORCA rings  : {stats['orca_agent_steps']} agent-steps flown under "
+              f"reciprocal avoidance inside the roundabout zones "
+              f"(pair clearance {2*stats['orca_radius_m']:.0f} m, tau {stats['orca_tau_s']:.0f} s)")
+    if ring_travel:
+        _cut, _tot = stats["ring_cut_samples"], stats["ring_pos_samples"]
+        print(f"  centreline  : {_tot} position-samples, {_cut} inside a roundabout "
+              f"interior -> " + ("OK (all agents circulated the ring)" if _cut == 0
+                                 else f"VIOLATION ({100.0*_cut/max(_tot,1):.3f}% cut across)"))
+    if completed:
+        _km = sum(a.dist_m for a in completed) / 1000.0
+        _h = sum(a.complete_t - a.depart_t for a in completed) / 3600.0
+        _ah = sum(a.air_s for a in completed) / 3600.0
+        print(f"Velocity      : {_km/max(_h,1e-9):.1f} km/h door-to-door "
+              f"({_km:.0f} km flown / {_h:.1f} h from launch to complete); "
+              f"{_km/max(_ah,1e-9):.1f} km/h airborne-only; "
+              f"nominal cruise {float(np.mean([a.speed_kmh for a in completed])):.1f} km/h")
+    _idle_min = float(pget(params, 'MIN_DEST_IDLE_S', 300.0)) / 60.0
+    print(f"Battery/dock  : park {_idle_min:.0f} min at the dock and recharge to "
+          f"{float(pget(params,'CHARGE_TARGET_PCT',0.9))*100:.0f}% before the return leg; "
+          f"mean charge {mean_charge/60:.1f} min; {n_dead} ran flat mid-air")
+    print(f"                docked drones are NOT airborne traffic -> exempt from the "
+          f"separation/conflict checks ({stats['dock_exempt_samples']} agent-samples, "
+          f"peak {stats['peak_docked']} parked at once)")
+    if stats["dock_capacity"]:
+        _pk = stats["dock_peak_per_dock"]
+        _over = {k: v for k, v in _pk.items() if v > stats["dock_capacity"]}
+        print(f"Dock capacity : {stats['dock_capacity']} pads/dock; peak use "
+              + ", ".join(f"{k} {v}" for k, v in sorted(_pk.items()))
+              + f"  -> {'OK, none over capacity' if not _over else 'OVER: ' + str(_over)}"
+              + (f"; {stats['dock_full_holds']} arrivals held for a free pad"
+                 if stats["dock_full_holds"] else "; no arrival ever waited for a pad"))
     if stats["cost_map_loaded"]:
         print(f"Cost-map      : slowness field applied (min slowness "
               f"{stats['cost_map_min_slowness']:.2f}); true velocity = slowness x base speed")
@@ -3073,6 +3994,11 @@ def main() -> None:
               f"{'OK (<=1)' if stats['max_agents_per_leg'] <= 1 else 'VIOLATION'}")
     print(f"Patrols       : {stats['patrol_sorties']} sorties launched "
           f"(every {pget(params,'PATROL_INTERVAL_MIN',30.0):.0f} min), {stats['patrol_laps']} loops flown")
+    _hc = stats["hold_cause"]
+    _hct = sum(v for k, v in _hc.items() if k != "launch_queue") or 1
+    print(f"Hold causes   : leader {100*_hc['leader']/_hct:.0f}%  "
+          f"node-mutex {100*_hc['node']/_hct:.0f}%  block {100*_hc['block']/_hct:.0f}%  "
+          f"({_hct} airborne hold-samples; launch-queue {_hc['launch_queue']} separately)")
     print(f"Conflicts     : {stats['total_conflict_samples']} conflict-samples in "
           f"{stats['n_conflict_frames']} frames (peak {stats['peak_conflicts']} at once); "
           f"threshold < {stats['conflict_time_s']:.0f}s time-separation  [red stars]")
@@ -3141,6 +4067,12 @@ def main() -> None:
     # ---- outputs ----
     write_missions(agents, params, output_dir / "agent_missions.csv")
     write_timeline(timeline, output_dir / "sim_timeline.csv")
+    # every loss of the horizontal separation standard, with where it happened
+    pd.DataFrame(stats["sep_violation_log"],
+                 columns=["t_s", "agent_a", "agent_b", "gap_m", "x", "y",
+                          "res_a", "res_b", "flight_level"]) \
+      .round({"t_s": 1, "gap_m": 2, "x": 1, "y": 1}) \
+      .to_csv(output_dir / "separation_violations.csv", index=False)
     if bool(pget(params, "WRITE_TRAJECTORY", True)):
         write_trajectories(frames, output_dir / "trajectories.csv")
 
@@ -3189,15 +4121,85 @@ def main() -> None:
         "shift_hours": float(pget(params, "SHIFT_HOURS", 1.0)),
         "sim_end_hours": stats["sim_end_t"] / 3600.0,
         "node_mutex_enabled": bool(pget(params, "NODE_MUTEX_ENABLE", False)),
+        "hold_cause": stats["hold_cause"],
         "flight_levels": int(pget(params, "FLIGHT_LEVELS", 4)),
         "launch_spacing_s": float(pget(params, "LAUNCH_SPACING_S", 2.0)),
         "reference_separation_m": sep_eff,
         "min_closest_approach_m": approach,
+        # ---- compliance against the declared separation standard ----
+        "separation_standard": {
+            "horizontal_m": stats["sep_standard_h_m"],
+            "longitudinal_s": stats["sep_standard_v_s"],
+            "min_horizontal_observed_m": stats["min_approach_m"],
+            "min_in_trail_gap_observed_m": stats["min_lane_gap_m"],
+            "pair_samples_checked": int(stats["n_pair_samples"]),
+            "violation_samples": int(stats["sep_violation_samples"]),
+            "violation_frames": int(stats["sep_violation_frames"]),
+            "peak_simultaneous_violations": int(stats["peak_sep_violations"]),
+            "worst_horizontal_m": stats["worst_sep_m"],
+            "violation_rate": (stats["sep_violation_samples"] / stats["n_pair_samples"])
+            if stats["n_pair_samples"] else 0.0,
+            "horizontal_respected": bool(stats["sep_violation_samples"] == 0),
+        },
+        "centreline_compliance": {
+            "ring_travel": bool(ring_travel),
+            "roundabout_rule": ("one-way CCW, exit right" if ring_right_hand
+                                else "shorter-arc"),
+            "position_samples": int(stats["ring_pos_samples"]),
+            "zone_model": ("2-D ORCA area (violation = inside the central island)"
+                           if stats["orca_rings"] else
+                           "1-D circulating ring (violation = inside the ring)"),
+            "inside_ring_interior_samples": int(stats["ring_cut_samples"]),
+            "respected": bool(stats["ring_cut_samples"] == 0),
+        },
+        "scheduling": ({"mode": "ctot"}
+                       | {k: v for k, v in sched_info.items()
+                          if k not in ("rows", "dock_profile")}
+                       ) if sched_info else {"mode": "reactive"},
+        "orca": {
+            "enabled": bool(stats["orca_rings"]),
+            "agent_steps_in_zones": int(stats["orca_agent_steps"]),
+            "agent_radius_m": stats["orca_radius_m"],
+            "pair_clearance_m": 2.0 * stats["orca_radius_m"],
+            "tau_s": stats["orca_tau_s"],
+        },
         "peak_holding": int(peak_hold),
         "total_hold_events": int(tot_holds),
         "total_hold_minutes": tot_hold / 60.0,
         "mean_flight_time_s": float(np.mean([a.complete_t - a.depart_t for a in completed]))
         if completed else None,
+        # ACHIEVED velocity = distance flown / time taken, over completed missions.
+        # "door_to_door" divides by the whole launch->complete span, so it carries
+        # holds, cost-map slow-downs and the dock stop; "airborne" divides by
+        # airborne time only, isolating flight-phase loss from time parked.
+        "velocity": ({
+            "door_to_door_kmh": round(3.6 * sum(a.dist_m for a in completed)
+                                      / max(sum(a.complete_t - a.depart_t
+                                                for a in completed), 1e-9), 2),
+            "airborne_kmh": round(3.6 * sum(a.dist_m for a in completed)
+                                  / max(sum(a.air_s for a in completed), 1e-9), 2),
+            "nominal_cruise_kmh": round(float(np.mean([a.speed_kmh for a in completed])), 2),
+            "total_distance_km": round(sum(a.dist_m for a in completed) / 1000.0, 1),
+            "total_time_h": round(sum(a.complete_t - a.depart_t for a in completed)
+                                  / 3600.0, 2),
+        } if completed else None),
+        "dock_stop": {
+            "min_idle_s": float(pget(params, "MIN_DEST_IDLE_S", 300.0)),
+            "charge_target_pct": float(pget(params, "CHARGE_TARGET_PCT", 0.9)),
+            "conflict_exempt": True,
+            "note": "a drone parked at a dock is not airborne traffic, so it is "
+                    "excluded from the separation and conflict checks",
+            "exempt_agent_samples": int(stats["dock_exempt_samples"]),
+            "peak_docked": int(stats["peak_docked"]),
+            "park_buffer_s": float(pget(params, "DOCK_PARK_BUFFER_S", 600.0)),
+            "capacity_per_dock": int(stats["dock_capacity"]),
+            "peak_per_dock": stats["dock_peak_per_dock"],
+            "dock_full_holds": int(stats["dock_full_holds"]),
+            "capacity_respected": bool(
+                stats["dock_capacity"] == 0
+                or all(v <= stats["dock_capacity"]
+                       for v in stats["dock_peak_per_dock"].values())),
+        },
         "total_flown_km": (sum(a.dist_m for a in agents) + sum(a.dist_m for a in patrols)) / 1000.0,
         "balance_routes": bool(pget(params, "BALANCE_ROUTES", True)),
         "arrival_window_h": float(pget(params, "ARRIVAL_WINDOW_H", pget(params, "SHIFT_HOURS", 1.0))),
@@ -3227,9 +4229,18 @@ def main() -> None:
     plot_density(net, frames, fig_dir / "01_density.png", stats.get("conflict_pts"))
     plot_timeline(timeline, sep_eff, fig_dir / "02_timeline.png", stats["peak_concurrent"])
     plot_energy(agents, params, fig_dir / "03_energy.png")
+    if sched_info and sched_info.get("rows"):
+        # the schedule as data, then as a picture
+        pd.DataFrame(sched_info["rows"]).to_csv(
+            output_dir / "departure_schedule.csv", index=False)
+        sched_info["dock_capacity"] = sched_info.get("dock_cap_for_plot",
+                                                     sched_info.get("dock_capacity", 0))
+        plot_schedule(sched_info, params, fig_dir / "04_schedule.png")
+        print(f"  schedule      : departure_schedule.csv + figures/04_schedule.png")
     if bool(pget(params, "MAKE_HTML", True)):
         print("  writing interactive HTML ...")
-        write_html(net, frames, params, sep_eff, output_dir / "agents_animation.html")
+        write_html(net, frames, params, sep_eff, output_dir / "agents_animation.html",
+                   velocity=metrics.get("velocity"))
     if bool(pget(params, "MAKE_AGENT_ROUTE_HTML", True)):
         print("  writing per-agent route HTML (agent_route/) ...")
         n_ar = write_agent_routes(net, frames, params, output_dir,
