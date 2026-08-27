@@ -316,3 +316,152 @@ for the same reason. Makespan is unchanged — the dock pads still set it.
 * **No VO-MPC.** Coordination is planned scheduling plus single-step ORCA. ORCA
   is a velocity-obstacle method, but it solves one LP for the next velocity — no
   control sequence, no cost function, no receding horizon.
+
+---
+
+# Next steps
+
+Three tracks. The stress tests are listed last but come first in priority,
+because every number in this document is from **one map seed and one fleet
+seed** — see *Methodological gap* below.
+
+Anything new goes in a sibling `07x_simulate_<method>_*` per the convention in
+[PIPELINE.md](PIPELINE.md), so it can be compared against the scheduling build on
+the same network rather than replacing it.
+
+---
+
+## A. VO-MPC
+
+Today's tactical layer is **VO but not MPC**: ORCA solves one linear program for
+the next velocity. `ORCA_TAU_S = 4.0` is the geometric look-ahead of the velocity
+cone, not a prediction horizon — there is no control sequence, no cost function
+and no receding horizon.
+
+The VO half is already built and validated, so the step is contained: keep the
+ORCA half-planes from `src/orca.py` as **constraints**, and solve over an N-step
+horizon with an objective instead of a single projection.
+
+```
+minimise  Σ ‖p_k − centreline‖²  +  λ_u‖Δv_k‖²  +  λ_e·energy(v_k)
+s.t.      ORCA half-planes at each step k
+          ‖v_k‖ ≤ v_max, boundary constraints (ring edge, island)
+```
+
+What it should buy — each of these is a defect this document already records:
+
+* **Removes the `ORCA_BIAS_DEG = 3.0` hack.** ORCA is exactly symmetric, so an
+  opposed pair deadlocks; a fixed 3° right bias currently breaks the tie. An
+  asymmetric cost term resolves it on principle rather than by nudge.
+* **A candidate fix for the 1-D ↔ 2-D seam** (42 % of remaining violations). An
+  MPC horizon spans the hand-off, so the drone plans *through* the zone boundary
+  instead of switching models at it.
+* **Replaces the reactive leg speed law** with one that anticipates the leader
+  rather than ramping down on present clearance.
+
+Cost and risks: roughly **N× the per-agent compute** — the current run does 224 k
+single-step ORCA solves. A QP solver becomes a dependency unless the problem is
+kept linear. And the horizon must be short enough that the constant-neighbour-
+velocity assumption still holds; ORCA's guarantee does not automatically extend
+to a multi-step plan.
+
+**Measure against** the current run, same network and seed: separation violations
+by category, achieved velocity, makespan, and solve time per agent-step.
+
+---
+
+## B. Multi-agent reinforcement learning
+
+The simulator is already close to an environment — state, action and reward all
+exist as quantities the engine computes.
+
+| | candidate |
+|---|---|
+| observation | own leg progress + remaining route, k nearest same-level neighbours (relative position/velocity), local cost-map slowness, battery, time to the booked pad |
+| action | speed along the lane, plus lateral offset inside a ring zone — the same two degrees of freedom the current model exposes |
+| reward | delivered on time − separation violations − energy − holding: the terms already in `metrics.json` |
+
+**The blocker is speed, and it is a hard one.** A 1000-drone run takes ~15
+minutes; MARL needs millions of episodes. Before any training is meaningful the
+simulator needs a headless vectorised fast path — no HTML, no figures, no
+per-agent trajectory logging, many environments stepped in parallel. That
+refactor is a prerequisite, not a detail, and it is worth doing anyway because it
+also makes the stress-test sweeps below cheap.
+
+Two risks worth naming before investing:
+
+* **Reward shaping decides the answer.** The weights between "delivered" and
+  "separation kept" *are* the policy; a learned agent will exploit whatever the
+  reward under-specifies. The cost-map layers (econ / air / ground) are a
+  reasonable starting basis precisely because they were designed as an explicit
+  trade-off rather than a single scalar.
+* **Non-stationarity.** Every agent learning at once means each one's environment
+  is moving. Self-play against a frozen opponent pool, or centralised training
+  with decentralised execution — not naive independent learners.
+
+A fair comparison also needs the **scripted baseline in the same environment**
+(the current scheduling + ORCA build), or an improvement cannot be attributed to
+learning rather than to the environment having changed.
+
+---
+
+## C. Stress tests
+
+### Methodological gap to close first
+
+Every result in this document — 1000/1000 delivered, 0.222 % violations, the DB
+pad bottleneck — comes from **`SIM_SEED = 12345` on map `seed2298177982`**. One
+map, one fleet realisation. None of it has an error bar, and the ranking of two
+designs could plausibly flip on another map.
+
+`--seed` is already a CLI override, so this is cheap:
+
+```bash
+for s in 1 2 3 4 5 6 7 8 9 10; do
+  python 07a_simulate_fmm_scheduling.py --seed $s --no-pyvista
+done
+```
+
+**Report medians and spread, not single runs**, and re-check the headline claims
+against them.
+
+### Load and capacity sweeps
+
+| sweep | knob | what it answers |
+|---|---|---|
+| demand | `N_AGENTS` 250 → 4000 | where throughput saturates, and which constraint binds at each level |
+| dock pads | `DOCK_CAPACITY` 2 → 20 | confirms the DB-pad bottleneck in the full sim, not only in the scheduler-only sweep already done |
+| pads by demand | per-dock capacities | the actual proposal — more pads at DB01/DB02 — which today's single global number cannot express |
+| airborne cap | `MAX_CONCURRENT` 50 → 400 | at what point airspace replaces pads as the binding constraint |
+| separation | `SEPARATION_M` 30 → 100 m | the cost of the safety standard, in throughput |
+| flight levels | `FLIGHT_LEVELS` 2 → 10 | vertical stacking as the alternative to widening rings |
+| fleet mix | `SPEED_CLASSES_KMH` | the energy gate promotes 29 missions today; how that scales |
+
+### Degraded modes
+
+None are currently modelled, and each targets a specific known weakness:
+
+* **Dock outage** — take DB01 offline mid-shift. The pad bottleneck predicts this
+  is severe; the live reservation system should re-plan around it.
+* **Corridor closure** — close a trunk leg and see whether the reroute logic
+  finds capacity or gridlocks.
+* **Battery derate** — 200 → 150 Wh, an aged fleet. The energy gate should promote
+  far more missions; past some derate no class is feasible and the gate should
+  say so rather than launch into failure.
+* **Demand burst** — compress `ARRIVAL_WINDOW_H` so all demand arrives at once,
+  against a scheduler that assumes it can spread departures.
+* **Wind field** — a directional bias on true velocity. The cost-map already
+  carries a slowness field so the mechanism exists; the asymmetry (cheap
+  downwind, expensive upwind) is what the energy gate has never been tested on.
+
+### Fidelity checks
+
+* **Sampling rate.** The separation check runs every `SAMPLE_EVERY_S = 20 s`
+  against `DT_S = 1 s` — 19 of every 20 steps go unchecked. Re-run at
+  `SAMPLE_EVERY_S = 1` and measure how far the violation rate rises. Everything
+  reported here is a lower bound until this is quantified.
+* **Collision metric.** Add `AIRFRAME_RADIUS_M` and count contacts separately from
+  separation losses. The run recorded a 0.49 m minimum gap with 5 pairs under
+  1 m — physically collisions, currently logged as separation losses.
+* **Time-step convergence.** Halve `DT_S` and confirm the results are a property
+  of the model rather than of the integrator.

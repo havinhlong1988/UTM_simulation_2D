@@ -175,4 +175,6 @@ Worth opening first:
 | `output/<b>/07_agent_sim_scheduling/figures/04_schedule.png` | the FCFS departure schedule |
 
 See [PIPELINE.md](PIPELINE.md) for what each stage does, and [roadmap.md](roadmap.md)
-for how the current design was arrived at.
+for how the current design was arrived at — including its **known limits** and the
+**next steps** (VO-MPC, multi-agent RL, and the stress tests that should come first,
+since every result so far is from a single seed).
